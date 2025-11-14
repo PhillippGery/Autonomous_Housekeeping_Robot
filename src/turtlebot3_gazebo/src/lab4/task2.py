@@ -9,6 +9,9 @@ import rclpy
 from rclpy.node import Node
 from nav_msgs.msg import Path
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Pose, Twist
+from sensor_msgs.msg import Image, LaserScan
+from vision_msgs.msg import BoundingBox2D
+from cv_bridge import CvBridge
 from std_msgs.msg import Float32
 from ament_index_python.packages import get_package_share_directory
 
@@ -48,7 +51,8 @@ class Task2(Node):
         # 3. Get the value of the parameter from the launch file (or use the default)
         map_yaml_path = self.get_parameter('map_yaml_path').get_parameter_value().string_value
 
-        
+        self.min_front_obstacle_distance = 0.4  # Meters
+      
         inflation_kernel_size = 8
         self.max_dist_alternate_Ponit = 1.0  # if start or stop pose is not valid, search for alternate point within this distance (meters)
         self.max_angle_alpha_to_startdrive = 1.0  # radian (57 degrees)
@@ -60,7 +64,7 @@ class Task2(Node):
         self.k_beta = -0.1        # Gain for final orientation correction
 
         self.yaw_tolerance = 0.1  # Radians (~5.7 degrees)
-        self.kp_final_yaw = 0.8   # Proportional gain for final yaw correction
+        self.kp_final_yaw = 0.8   # Proportional gain for final yaw correction --> faster
 
         self.min_lookahead_dist = 0.2  # The smallest the lookahead distance can be
         self.lookahead_ratio = 0.5     # How much the lookahead increases with speed
@@ -85,10 +89,16 @@ class Task2(Node):
 
         self.create_subscription(PoseStamped, '/move_base_simple/goal', self.__goal_pose_cbk, 10)
         self.create_subscription(PoseWithCovarianceStamped, '/amcl_pose', self.__ttbot_pose_cbk, 10)
+        #sself.create_subscription( Image, '/camera/image_raw', self.listener_callback, 10)
+        self.create_subscription(LaserScan, '/scan', self._check_for_obstacles, 10)
 
         self.path_pub = self.create_publisher(Path, 'global_plan', 10)
         self.cmd_vel_pub = self.create_publisher(Twist, 'cmd_vel', 10)
         self.calc_time_pub = self.create_publisher(Float32, 'astar_time',10)
+        #self.bbox_publisher = self.create_publisher(BoundingBox2D, '/bbox', 10)
+
+        #self.bridge = CvBridge()
+        self.ranges = []
 
         self.rate = 10.0
         self.timer = self.create_timer(1.0 / self.rate, self.run_loop)
@@ -407,8 +417,32 @@ class Task2(Node):
 
         if self.ttbot_pose is None or self.goal_pose is None or not self.path.poses:
             return
-            
-        final_goal_pose = self.path.poses[-1]
+        
+
+        if self.state == 'OBSTACLE_AVOIDANCE':
+            # Currently avoiding an obstacle, skip path following
+            return
+        
+        
+        final_goal_pose = self.path.poses[-1]                           
+        # Get the current goal from the path, possibly using line-of-sight optimization
+        self.Path_optimizaton( final_goal_pose)
+      
+        # Calculate and publish robot commands
+        speed, heading = self.path_follower(self.ttbot_pose, self.current_goal)
+        self.move_ttbot(speed, heading)
+        self.last_commanded_speed = speed
+
+
+        # Check if we have reached the final goal position and orientation
+        self.Check_alingment_Goal( final_goal_pose) 
+
+        
+
+    def Check_alingment_Goal(self, final_goal_pose):
+        """! Check if the robot has reached the final goal position and orientation.
+        """
+
         dx = final_goal_pose.pose.position.x - self.ttbot_pose.pose.position.x
         dy = final_goal_pose.pose.position.y - self.ttbot_pose.pose.position.y
         dist_to_final_goal = math.sqrt(dx**2 + dy**2)
@@ -441,7 +475,7 @@ class Task2(Node):
             # Check if the orientation is also within tolerance
             if abs(yaw_error) < self.yaw_tolerance:
                 # GOAL REACHED: Position and orientation are correct. Stop everything.
-                self.get_logger().info("Goal reached!")
+                self.get_logger().info("Goal reached and Alinged to Goal Pose!")
                 self.move_ttbot(0.0, 0.0)
                 self.path = Path()
                 self.goal_pose = None
@@ -456,32 +490,29 @@ class Task2(Node):
                 self.move_ttbot(speed, heading)
                 # Skip the rest of the loop while we are aligning
                 return
-        
-        current_goal = None
+
+    def Path_optimizaton(self, final_goal_pose):
+        """! Path optimization using line-of-sight checking.
+        and shortcutting to the final goal if possible.
+        """
+
+        self.current_goal = None
 
         if self.use_line_of_sight_check and not self.shortcut_active:
             start_grid = self._world_to_grid((self.ttbot_pose.pose.position.x, self.ttbot_pose.pose.position.y))
             end_grid = self._world_to_grid((final_goal_pose.pose.position.x, final_goal_pose.pose.position.y))
-
             if self._is_path_clear(start_grid, end_grid):
-                current_goal = final_goal_pose
+                self.current_goal = final_goal_pose
                 self.shortcut_active = True
                 self.get_logger().info("Path is clear. Taking a shortcut to the final goal.")
 
         # If no clear path, use the standard logic
         if self.shortcut_active:
-            current_goal = final_goal_pose
+            self.current_goal = final_goal_pose
         else:
             idx = self.get_path_idx(self.path, self.ttbot_pose)
-            current_goal = self.path.poses[idx]
-        
-        # Calculate and publish robot commands
-        speed, heading = self.path_follower(self.ttbot_pose, current_goal)
-        self.move_ttbot(speed, heading)
-
-        self.last_commanded_speed = speed
-
-
+            self.current_goal = self.path.poses[idx]
+        return self
 
     def _world_to_grid(self, world_coords):
         """!
@@ -521,11 +552,36 @@ class Task2(Node):
         
         return (world_x, world_y)
     
-    def _check_for_obstacles(self):
+    def _check_for_obstacles(self, scan_msg):
         """!
         Checks for obstacles while following the path.
+        called from scan subscription
+        indipendent from run_loop and path following
         """
+        #self.get_logger().info("Checking for obstacles...")
         
+        # Process laser scan data
+        ranges = np.array(scan_msg.ranges)
+        ranges[np.isinf(ranges)] = np.nan
+        ranges[ranges == 0.0] = np.nan
+        
+        #front slice is 20 degrees to left and right
+        front_slice = np.concatenate((ranges[0:20], ranges[340:360]))
+        
+        try:
+            front_dist = np.nanmin(front_slice)
+            #self.get_logger().info(f"Minimum front distance: {front_dist:.2f} m")
+        except ValueError:
+            # happens if all readings in a slice are 'nan'
+            self.get_logger().warn("laser readings are 'nan'. Skipping loop.", throttle_duration_sec=1)
+            return
+        
+        if front_dist < self.min_front_obstacle_distance:
+            if self.state != 'OBSTACLE_AVOIDANCE':
+                self.get_logger().warn(f"Obstacle detected at {front_dist:.2f} m! Stopping robot.", throttle_duration_sec=1)
+                self.state = 'OBSTACLE_AVOIDANCE'
+            self.move_ttbot(0.0, 0.0)
+
 
 
 class Queue():
@@ -728,8 +784,6 @@ class Map():
         grid[raw_image_array > free_pixel_threshold] = 0
         
         self.image_array = grid
-
-
 
 class MapProcessor():
     def __init__(self,name):

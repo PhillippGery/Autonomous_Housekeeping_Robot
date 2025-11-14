@@ -115,6 +115,7 @@ class Navigation(RosNode):
             self.get_logger().warn("A* failed to find a path to the goal.")
             self.move_ttbot(0.0, 0.0)
 
+
     def __ttbot_pose_cbk(self, data):
         """! Callback to catch the position of the vehicle.
         @param  data    PoseWithCovarianceStamped object from amcl.
@@ -401,8 +402,24 @@ class Navigation(RosNode):
         """! Main loop of the node, called by a timer. """
         if self.ttbot_pose is None or self.goal_pose is None or not self.path.poses:
             return
-            
         final_goal_pose = self.path.poses[-1]
+
+        # Check if we have reached the final goal position and orientation
+        self.Check_alingment_Goal(self, final_goal_pose)
+                       
+        # Get the current goal from the path, possibly using line-of-sight optimization
+        self.Path_optimizaton(self, final_goal_pose)
+        
+        # Calculate and publish robot commands
+        speed, heading = self.path_follower(self.ttbot_pose, self.current_goal)
+        self.move_ttbot(speed, heading)
+
+        self.last_commanded_speed = speed
+
+    def Check_alingment_Goal(self, final_goal_pose):
+        """! Check if the robot has reached the final goal position and orientation.
+        """
+
         dx = final_goal_pose.pose.position.x - self.ttbot_pose.pose.position.x
         dy = final_goal_pose.pose.position.y - self.ttbot_pose.pose.position.y
         dist_to_final_goal = math.sqrt(dx**2 + dy**2)
@@ -450,30 +467,31 @@ class Navigation(RosNode):
                 self.move_ttbot(speed, heading)
                 # Skip the rest of the loop while we are aligning
                 return
-        
-        current_goal = None
+
+
+    def Path_optimizaton(self, final_goal_pose):
+        """! Path optimization using line-of-sight checking.
+        and shortcutting to the final goal if possible.
+        """
+
+        self.current_goal = None
 
         if self.use_line_of_sight_check and not self.shortcut_active:
             start_grid = self._world_to_grid((self.ttbot_pose.pose.position.x, self.ttbot_pose.pose.position.y))
             end_grid = self._world_to_grid((final_goal_pose.pose.position.x, final_goal_pose.pose.position.y))
-
             if self._is_path_clear(start_grid, end_grid):
-                current_goal = final_goal_pose
+                self.current_goal = final_goal_pose
                 self.shortcut_active = True
                 self.get_logger().info("Path is clear. Taking a shortcut to the final goal.")
 
         # If no clear path, use the standard logic
         if self.shortcut_active:
-            current_goal = final_goal_pose
+            self.current_goal = final_goal_pose
         else:
             idx = self.get_path_idx(self.path, self.ttbot_pose)
-            current_goal = self.path.poses[idx]
-        
-        # Calculate and publish robot commands
-        speed, heading = self.path_follower(self.ttbot_pose, current_goal)
-        self.move_ttbot(speed, heading)
+            self.current_goal = self.path.poses[idx]
+        return self
 
-        self.last_commanded_speed = speed
 
 
 
@@ -518,7 +536,8 @@ class Navigation(RosNode):
 
 def main(args=None):
     rclpy.init(args=args)
-    nav = Navigation(node_name='Navigation')        self.timer = self.create_timer(0.1, self.timer_cb)
+    nav = Navigation(node_name='Navigation')        
+    self.timer = self.create_timer(0.1, self.timer_cb)
         # Fill in the initialization member variables that you need
 
     def __init__(self, node_name='Navigation'):
