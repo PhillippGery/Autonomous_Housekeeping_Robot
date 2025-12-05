@@ -57,7 +57,7 @@ install(
   PROGRAMS
     src/lab4/task1.py
     DESTINATION lib/${PROJECT_NAME}
-    RENAME task1
+    #RENAME task1
 )
 install(
   PROGRAMS
@@ -69,7 +69,7 @@ install(
   PROGRAMS
     src/lab4/task3.py
     DESTINATION lib/${PROJECT_NAME}
-    RENAME task3
+    #RENAME task3
 )
 install(
   PROGRAMS
@@ -81,7 +81,7 @@ install(
   PROGRAMS
     src/lab4/task2_bonus.py
   DESTINATION lib/${PROJECT_NAME}
-  RENAME task2_bonus
+  #RENAME task2_bonus
 )
 
 install(

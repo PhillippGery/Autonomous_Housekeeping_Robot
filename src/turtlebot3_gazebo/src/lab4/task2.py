@@ -51,9 +51,15 @@ class Task2(Node):
         # 3. Get the value of the parameter from the launch file (or use the default)
         map_yaml_path = self.get_parameter('map_yaml_path').get_parameter_value().string_value
 
+        #Obstacle avoidance variables
+        self.obstacle_state = 'CLEAR'
         self.min_front_obstacle_distance = 0.4  # Meters
+        self.obstacle_inflation_radius_m = 0.35
+        self.retreat_distance = -0.30      # Distance to retreat in meters (e.g., -10 cm)
+        self.current_retreat_distance = 0.0 # Tracker for distance moved during retreat
+        self.retreat_speed = -0.15          # Reverse linear speed (m/s)
       
-        inflation_kernel_size = 9
+        inflation_kernel_size = 10
         self.max_dist_alternate_Ponit = 1.0  # if start or stop pose is not valid, search for alternate point within this distance (meters)
         self.max_angle_alpha_to_startdrive = 1.0  # radian (57 degrees)
         
@@ -421,12 +427,32 @@ class Task2(Node):
 
         if self.ttbot_pose is None or self.goal_pose is None or not self.path.poses:
             return
-
-        #self.get_logger().info(f"Loop running in state: {self.state}")
+        
+        
+        if self.obstacle_state == 'RETREATING':
+            # Calculate distance moved in this cycle (dt)
+            dt = 1.0 / self.rate
+            distance_moved = abs(self.retreat_speed * dt)
+            
+            # Check if we have met the retreat distance goal
+            if self.current_retreat_distance < abs(self.retreat_distance):
+                # Haven't moved far enough back yet.
+                self.move_ttbot(self.retreat_speed, 0.0) # Move backward (speed is negative)
+                self.current_retreat_distance += distance_moved
+                self.get_logger().warn(f"Retreating: {self.current_retreat_distance:.3f} / {abs(self.retreat_distance):.3f} m", throttle_duration_sec=0.1)
+                return # Skip path following
+            else:
+                # Retreat distance met. Stop and transition to REPLANNING.
+                self.move_ttbot(0.0, 0.0) # Ensure robot is stopped
+                self.get_logger().info("Retreat complete. Transitioning to REPLANNING.")
+                self.obstacle_state = 'REPLANNING'
+                self.replan_with_obstacle()
+                # After setting the state, the next cycle of _check_for_obstacles will call replan_with_obstacle.
+                return
         
 
-        if self.state == 'OBSTACLE_AVOIDANCE':
-            # Currently avoiding an obstacle, skip path following
+        if self.obstacle_state == 'REPLANNING':
+            self.move_ttbot(0.0, 0.0)
             return
         
         
@@ -564,14 +590,13 @@ class Task2(Node):
         called from scan subscription
         indipendent from run_loop and path following
         """
-        #self.get_logger().info("Checking for obstacles...")
+        if self.ttbot_pose is None or self.goal_pose is None:
+            return
         
         # Process laser scan data
         ranges = np.array(scan_msg.ranges)
         ranges[np.isinf(ranges)] = np.nan
         ranges[ranges == 0.0] = np.nan
-        
-        #front slice is 20 degrees to left and right
         front_slice = np.concatenate((ranges[0:20], ranges[340:360]))
         
         try:
@@ -582,11 +607,84 @@ class Task2(Node):
             self.get_logger().warn("laser readings are 'nan'. Skipping loop.", throttle_duration_sec=1)
             return
         
-        if front_dist < self.min_front_obstacle_distance:
-            if self.state != 'OBSTACLE_AVOIDANCE':
-                self.get_logger().warn(f"Obstacle detected at {front_dist:.2f} m! Stopping robot.", throttle_duration_sec=1)
-                self.state = 'OBSTACLE_AVOIDANCE'
+        obstacle_close = front_dist < self.min_front_obstacle_distance
+
+        if obstacle_close and self.obstacle_state == 'CLEAR':
+            # 1. New unmapped obstacle detected!
+            self.state = 'OBSTACLE_AVOIDANCE'
+            self.obstacle_state = 'DETECTED'
+            self.move_ttbot(0.0, 0.0) # Stop immediately
+
+            self.current_retreat_distance = 0.0
+            self.retreat_angle = 0.0
+
+            obstacle_range_idx = np.nanargmin(front_slice)
+            
+            quat = self.ttbot_pose.pose.orientation
+            siny_cosp = 2 * (quat.w * quat.z + quat.x * quat.y)
+            cosy_cosp = 1 - 2 * (quat.y * quat.y + quat.z * quat.z)
+            robot_theta = math.atan2(siny_cosp, cosy_cosp)
+
+            R_obs = self.obstacle_inflation_radius_m
+            distance_to_center = front_dist + R_obs
+            
+            # Use distance_to_center to project the obstacle center's world coordinates
+            obs_world_x = self.ttbot_pose.pose.position.x + distance_to_center * math.cos(robot_theta)
+            obs_world_y = self.ttbot_pose.pose.position.y + distance_to_center * math.sin(robot_theta)
+            
+            self.obstacle_pos_world = (obs_world_x, obs_world_y)
+            
+            self.get_logger().warn(f"Unmapped obstacle detected at {front_dist:.2f}m. Triggering replanning.")
+            self.get_logger().info(f"Estimated obstacle position (world): x={obs_world_x:.2f}, y={obs_world_y:.2f}")
+            
+        if self.obstacle_state == 'DETECTED':
+            self.current_retreat_distance = 0.0
+            self.obstacle_state = 'RETREATING'
+
+
+    def replan_with_obstacle(self):
+        """!
+        Adds the detected obstacle to the map costmap and runs A* planning again.
+        """
+
+        obs_grid_coords = self._world_to_grid(self.obstacle_pos_world)
+        obs_y, obs_x = obs_grid_coords
+        
+
+        resolution = self.map_processor.map.resolution
+        pixel_radius = int(self.obstacle_inflation_radius_m / resolution)
+        
+        self.get_logger().info(f"Adding obstacle to map at grid pos ({obs_y}, {obs_x}) with radius {pixel_radius} cells.")
+        
+        H, W = self.map_processor.inf_map_img_array.shape
+        Y, X = np.ogrid[-obs_y:H-obs_y, -obs_x:W-obs_x]
+
+        mask = X**2 + Y**2 <= pixel_radius**2
+        
+
+        self.map_processor.inf_map_img_array[mask] = 1 
+        
+        self.map_processor.get_graph_from_map()
+        self.get_logger().info("Graph updated with new obstacle.")
+
+
+        if self.goal_pose is not None:
+            self.path = self.a_star_path_planner(self.ttbot_pose, self.goal_pose)
+
+            if self.path.poses:
+                self.path_pub.publish(self.path)
+                self.current_path_idx = 0
+                self.shortcut_active = False # Reset shortcut flag
+                self.state = 'ASTARPATH_FOLLOWING' # Resume driving
+                self.obstacle_state = 'CLEAR' 
+                self.get_logger().info("Replanning successful. Resuming navigation.")
+            else:
+                self.get_logger().error("REPLANNING FAILED: New obstacle blocks all paths. Robot stopped.")
+                self.move_ttbot(0.0, 0.0)
+        else:
+            self.get_logger().warn("Goal was cleared during replanning. Stopping.")
             self.move_ttbot(0.0, 0.0)
+            self.obstacle_state = 'CLEAR' # Clear status if no goal is set
 
     def publish_initial_pose(self):
         """
