@@ -116,7 +116,7 @@ def generate_launch_description():
         # Task2 Algorithm Node
         Node(
             package='turtlebot3_gazebo',
-            executable='task2',
+            executable='task2.py',
             name='task2_algorithm',
             output='screen',
             parameters=[{

@@ -63,7 +63,7 @@ install(
   PROGRAMS
     src/lab4/task2.py
     DESTINATION lib/${PROJECT_NAME}
-    RENAME task2
+    #RENAME task2
 )
 install(
   PROGRAMS

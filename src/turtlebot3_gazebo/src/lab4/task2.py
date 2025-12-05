@@ -53,7 +53,7 @@ class Task2(Node):
 
         self.min_front_obstacle_distance = 0.4  # Meters
       
-        inflation_kernel_size = 8
+        inflation_kernel_size = 9
         self.max_dist_alternate_Ponit = 1.0  # if start or stop pose is not valid, search for alternate point within this distance (meters)
         self.max_angle_alpha_to_startdrive = 1.0  # radian (57 degrees)
         
@@ -96,6 +96,10 @@ class Task2(Node):
         self.cmd_vel_pub = self.create_publisher(Twist, 'cmd_vel', 10)
         self.calc_time_pub = self.create_publisher(Float32, 'astar_time',10)
         #self.bbox_publisher = self.create_publisher(BoundingBox2D, '/bbox', 10)
+
+        #set inatl pose automaticly 
+        self.initial_pose_pub = self.create_publisher(PoseWithCovarianceStamped, '/initialpose', 10)
+        self.initial_pose_timer = self.create_timer(2.0, self.publish_initial_pose)
 
         #self.bridge = CvBridge()
         self.ranges = []
@@ -417,6 +421,8 @@ class Task2(Node):
 
         if self.ttbot_pose is None or self.goal_pose is None or not self.path.poses:
             return
+
+        self.get_logger().info(f"Loop running in state: {self.state}")
         
 
         if self.state == 'OBSTACLE_AVOIDANCE':
@@ -582,6 +588,27 @@ class Task2(Node):
                 self.state = 'OBSTACLE_AVOIDANCE'
             self.move_ttbot(0.0, 0.0)
 
+    def publish_initial_pose(self):
+        """
+        Publishes the initial pose to AMCL to set the robot's starting position
+        on the map and then cancels the timer.
+        """
+        pose_msg = PoseWithCovarianceStamped()
+        pose_msg.header.stamp = self.get_clock().now().to_msg()
+        pose_msg.header.frame_id = 'map'
+
+        # Set the position to the map's origin
+        pose_msg.pose.pose.position.x = 0.0#-5.4
+        pose_msg.pose.pose.position.y = 0.0#-6.18
+        pose_msg.pose.pose.position.z = 0.0
+
+        # Set the orientation (0 degrees yaw)
+        pose_msg.pose.pose.orientation.w = 1.0
+
+        self.get_logger().info("Publishing initial pose to AMCL-topic")
+        self.initial_pose_pub.publish(pose_msg)
+
+        self.initial_pose_timer.cancel()
 
 
 class Queue():
