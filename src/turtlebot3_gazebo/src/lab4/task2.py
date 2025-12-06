@@ -53,10 +53,10 @@ class Task2(Node):
 
         #Obstacle avoidance variables
         self.obstacle_state = 'CLEAR'
-        self.min_front_obstacle_distance = 0.4  # Meters
-        self.obstacle_inflation_radius_m = 0.35
-        self.retreat_distance = -0.30      # Distance to retreat in meters (e.g., -10 cm)
-        self.current_retreat_distance = 0.0 # Tracker for distance moved during retreat
+        self.min_front_obstacle_distance = 0.35  # Meters
+        self.obstacle_inflation_radius_m = 0.4
+        self.retreat_distance = -0.20      # Distance to retreat in meters 
+        self.current_retreat_distance = 0.0 # Tracker for retreat distance 
         self.retreat_speed = -0.15          # Reverse linear speed (m/s)
       
         inflation_kernel_size = 10
