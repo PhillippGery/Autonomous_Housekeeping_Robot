@@ -53,7 +53,7 @@ class Task1(Node):
         self.obstacle_state = 'CLEAR'
         self.min_front_obstacle_distance = 0.35  # Meters
         self.obstacle_inflation_radius_m = 0.4
-        self.retreat_distance = -0.20      # Distance to retreat in meters 
+        self.retreat_distance = -0.15      # Distance to retreat in meters 
         self.current_retreat_distance = 0.0 # Tracker for retreat distance 
         self.retreat_speed = -0.15          # Reverse linear speed (m/s)
 
@@ -68,14 +68,14 @@ class Task1(Node):
         self.rejected_goals_grid = [] # List to store rejected goal grid coordinates
         self.Frotier_Counter = 0
         self.Frontier_W_dist = 1.0
-        self.Frontier_W_power = 4.0 
+        self.Frontier_W_power = 3.0 
         self.min_frontier_distance = 0.6  # meters
         self.search_radius_cells = 7  # cells
-        self.min_free_neighbors_for_frontier = 3  # Minimum free neighbors required for a frontier cell
+        self.min_free_neighbors_for_frontier = 4  # Minimum free neighbors required for a frontier cell
 
 
         # Wall following variables
-        self.min_side_distance = 1.0  # Meters to trigger wall following
+        self.min_side_distance = 0.7  # Meters to trigger wall following
         self.min_time_in_narrow_space = 2.0  # Seconds to trigger wall following
         self.In_narrow_space = False
         self.wall_follower = WallFollower(
@@ -89,7 +89,7 @@ class Task1(Node):
         )
 
     
-        self.inflation_kernel_size = 6  # Size of the inflation kernel (should be odd)
+        self.inflation_kernel_size = 4  # Size of the inflation kernel (should be odd)
         self.max_dist_alternate_Ponit = 1.5  # if start or stop pose is not valid, search for alternate point within this distance (meters)
         self.max_angle_alpha_to_startdrive = 1.0  # radian (57 degrees)
         
@@ -153,7 +153,7 @@ class Task1(Node):
         self.timer = self.create_timer(1.0 / self.rate, self.run_loop)
 
         # start Time for MEasuring time of exporing map
-        self.exploration_start_time = self.get_clock().now().nanoseconds*1e-9
+        self.exploration_start_time = 0.0
 
 
     def __goal_pose_cbk(self, data):
@@ -166,8 +166,7 @@ class Task1(Node):
             return
                   
         self.goal_pose = data
-        self.get_logger().info(
-            'New goal received: {:.4f}, {:.4f}'.format(self.goal_pose.pose.position.x, self.goal_pose.pose.position.y))
+        #self.get_logger().info('New goal received: {:.4f}, {:.4f}'.format(self.goal_pose.pose.position.x, self.goal_pose.pose.position.y))
         
         if self.ttbot_pose is None:
             self.get_logger().warn("Cannot plan path, robot pose is not yet available.")
@@ -175,6 +174,13 @@ class Task1(Node):
             
         # Call the path planner to generate a new path
         self.path = self.a_star_path_planner(self.ttbot_pose, self.goal_pose)
+
+        if self.goal_pose:
+                start_world = (self.goal_pose.pose.position.x, self.goal_pose.pose.position.y)
+                end_grid = self._world_to_grid(start_world)
+                grid_name = f"{end_grid[0]},{end_grid[1]}"
+                self.rejected_goals_grid.append(grid_name)
+                self.get_logger().info(f"Rejected goals: {self.rejected_goals_grid}")
         
         # If a valid path was found, publish it and reset the path follower index and shortcut flag
         if self.path.poses:
@@ -187,11 +193,7 @@ class Task1(Node):
         else:
             self.get_logger().warn("A* failed to find a path to the goal.")
             self.move_ttbot(0.0, 0.0)
-            if self.goal_pose:
-                start_world = (self.goal_pose.pose.position.x, self.goal_pose.pose.position.y)
-                end_grid = self._world_to_grid(start_world)
-                grid_name = f"{end_grid[0]},{end_grid[1]}"
-                self.rejected_goals_grid.append(grid_name)
+            
 
     def __ttbot_pose_cbk(self, data):
         """! Callback to catch the position of the vehicle.
@@ -321,7 +323,7 @@ class Task1(Node):
         self.astarTime = Float32()
         self.astarTime.data = float(self.get_clock().now().nanoseconds*1e-9-self.start_time)
         self.calc_time_pub.publish(self.astarTime)
-        self.get_logger().info(f"A* planning time: {self.astarTime.data:.4f} seconds")
+        #self.get_logger().info(f"A* planning time: {self.astarTime.data:.4f} seconds")
         
         return path
 
@@ -478,19 +480,19 @@ class Task1(Node):
         """! Main loop of the node, called by a timer. """
 
         self.get_logger().info(f"Current State: {self.state}", throttle_duration_sec=4.0)
+               
         
+        if self.state == 'MAP_EXPLORED':
+            self.get_logger().info("Map fully explored. Stopping robot.", throttle_duration_sec=5.0)
+            self.move_ttbot(0.0, 0.0)
         
-        if self.goal_pose is None or self.state == 'IDLE':
+        elif self.goal_pose is None or self.state == 'IDLE':
             
             self.get_logger().info("Current mission complete or no goal. Initiating Frontier Search.", throttle_duration_sec=5.0)
 
             if self.map_initialized: # Make sure map is ready
-                self.map_processor.get_graph_from_map()           
-
-            frontier_points = self._find_frontiers()
-            self._select_and_set_goal(frontier_points)
-            
-            return 
+                self._select_and_set_goal(self.frontier_points)        
+            return # Skip rest of loop if no goal
 
         # Obstacle avoidance state machine
         # Retreating and plan new path with new Frontier goal
@@ -533,7 +535,6 @@ class Task1(Node):
             current_time = self.get_clock().now()
             linear_speed, angular_speed = self.wall_follower.compute_velocities(self.scan_msg, current_time)
             self.move_ttbot(float(linear_speed), float(angular_speed))
-            
         
         else:
             self.get_logger().warn(f"Unknown state: {self.state}. Stopping robot for safety.")
@@ -590,8 +591,8 @@ class Task1(Node):
                 self.last_commanded_speed = 0.0
                 self.integral_error_angular = 0.0
                 self.previous_error_angular = 0.0
-                self.rejected_goals_grid = [] # Clear rejected goals if new goal was found
                 self.Frotier_Counter += 1
+                self.rejected_goals_grid = []
                 self.get_logger().info(f"Frontier Goals Reached So Far: {self.Frotier_Counter}")
                 return
             else:
@@ -602,6 +603,7 @@ class Task1(Node):
                 heading = np.clip(heading, -self.rotspeed_max, self.rotspeed_max)
                 self.move_ttbot(speed, heading)
                 # Skip the rest of the loop while we are aligning
+                
                 return
 
     def Path_optimizaton(self, final_goal_pose):
@@ -683,7 +685,7 @@ class Task1(Node):
         ranges = np.array(scan_msg.ranges)
         ranges[np.isinf(ranges)] = np.nan
         ranges[ranges == 0.0] = np.nan
-        front_slice = np.concatenate((ranges[0:25], ranges[335:360]))
+        front_slice = np.concatenate((ranges[0:28], ranges[332:360]))
         right_slice = ranges[75:105]
         left_slice = ranges[255:285]
         
@@ -710,9 +712,10 @@ class Task1(Node):
                 
             if self.state != 'WALL_FOLLOWING' and self.enter_time is not None:
                 time_in_narrow_space = (self.get_clock().now() - self.enter_time).nanoseconds * 1e-9
-                is_area_unknown = self._check_area_ahead_unknown(distance_m=1.5, width_m=0.5, required_percentage=40.0)
+                
                 
                 if time_in_narrow_space >= self.min_time_in_narrow_space:
+                    is_area_unknown = self._check_area_ahead_unknown(distance_m=1.0, width_m=0.5, required_percentage=40.0)
                     if is_area_unknown: 
                         self.get_logger().warn("Narrow space confirmed. Switching to WALL_FOLLOWING mode.")
                         self.state = 'WALL_FOLLOWING'
@@ -723,7 +726,7 @@ class Task1(Node):
 
             # If robot was in narrow space, reset the flags/timer
             if self.In_narrow_space:
-                self.get_logger().info("Exiting narrow space detection zone.")
+                #self.get_logger().info("Exiting narrow space detection zone.")
                 self.In_narrow_space = False
                 self.enter_time = None
                 
@@ -740,11 +743,11 @@ class Task1(Node):
             self.get_logger().warn(f"Obstacle detected at {front_dist:.2f} m! Initiating avoidance maneuver.")
             self.obstacle_state = 'RETREATING'
             self.current_retreat_distance = 0.0
-            start_world = (self.goal_pose.pose.position.x, self.goal_pose.pose.position.y)
-            end_grid = self._world_to_grid(start_world)
-            grid_name = f"{end_grid[0]},{end_grid[1]}"
-            self.rejected_goals_grid.append(grid_name)
-            self.rejected_goals_grid = [] # Clear rejected goals if new obstacle found
+            # start_world = (self.goal_pose.pose.position.x, self.goal_pose.pose.position.y)
+            # end_grid = self._world_to_grid(start_world)
+            # grid_name = f"{end_grid[0]},{end_grid[1]}"
+            # self.rejected_goals_grid.append(grid_name)
+            #  # Clear rejected goals if new obstacle found
 
 
     def publish_initial_pose(self):
@@ -806,6 +809,7 @@ class Task1(Node):
         but not inflated).
         """
         if self.map_processor is None:
+            self.exploration_start_time = self.get_clock().now().nanoseconds*1e-9
             return
 
         # 1. Update Map Metadata
@@ -838,9 +842,6 @@ class Task1(Node):
         # Initialize the map_processor's array to the raw A* costmap
         self.map_processor.inf_map_img_array = np.copy(current_costmap)
 
-
-
-        
         # Define the kernel matrix
         inflation_kernel_matrix = self.rect_kernel(self.inflation_kernel_size * 2 + 1, 1)
         
@@ -864,6 +865,8 @@ class Task1(Node):
         # 4. Finalize Graph and State
         # Regenerate Graph
         self.map_processor.get_graph_from_map()
+        self.frontier_points = self._find_frontiers()
+        #self.rejected_goals_grid = [] # Clear rejected goals if new goal was found
 
         if not self.map_initialized:
             self.get_logger().info(f"Initial SLAM map received (H:{H}, W:{W}). A* graph built.")
@@ -984,27 +987,30 @@ class Task1(Node):
         else:
 
             #if less then 1% of the map is unknown consider exploration complete
-            # Calculate total cells, including Unknown, Free, and Occupied
-            total_cells = self.raw_map_data_array.size
-            unknown_cells = np.sum(self.raw_map_data_array == -1)
-            known_cells = total_cells - unknown_cells
-            if known_cells == 0:
-                unknown_percentage_vs_known = 100.0
-            else:
-                unknown_percentage_vs_known = (unknown_cells / known_cells) * 100.0
-
+            # Calculate frontier Points in corelation to known map area
+            frontier_points_count = len(frontier_points)
+            known_cells = np.sum((self.raw_map_data_array == 0) | (self.raw_map_data_array == 100))
+            unknown_percentage_vs_known = (frontier_points_count / known_cells) * 100.0        
+            
             self.get_logger().info(f"Unknown Map Percentage (vs Known): {unknown_percentage_vs_known:.2f}%")
-            if unknown_percentage_vs_known < 1.0:
-                self.get_logger().warn("Exploration Complete: Less than 1% of the map is unknown.")
+
+            if unknown_percentage_vs_known < 0.05:
+                self.get_logger().warn("Exploration Complete: Less than 0.05% of the map is unknown.")
                 # print exproation time
-                time = (self.get_clock().now().nanoseconds*1e-9 - self.exploration_start_time)/60.0
+                time_now = self.get_clock().now().nanoseconds*1e-9
+                time = (time_now - self.exploration_start_time - 18.0*60.0)/60.0    
                 self.get_logger().info(f"Total Exploration Time: {time:.2f} minutes")
                 self.get_logger().info(f"Total Frontier Goals Reached: {self.Frotier_Counter}")
                 self.state = 'MAP_EXPLORED'
             else:
                 self.get_logger().info("No valid frontier goal found. All candidates rejected or unreachable.")
-
-                
+                self.get_logger().info("Relaxing frontier selection criteria for next iteration.")
+                self.rejected_goals_grid = [] # Clear rejected goals to allow re-evaluation
+                self.min_frontier_distance = 0.0  # meters
+                self.min_free_neighbors_for_frontier = 0
+                self.frontier_points = self._find_frontiers()
+                self.state = 'IDLE'  # Retry goal selection in the next loop
+            
     def _calculate_local_area_gain(self, i, j):
         """
         Calculates Information Gain by counting unknown (-1) cells within a 
@@ -1070,7 +1076,7 @@ class Task1(Node):
         
         return len(pathnames) # Returns float('inf') if no path is found
 
-    def _check_area_ahead_unknown(self, distance_m=1.5, width_m=0.5, required_percentage=40.0):
+    def _check_area_ahead_unknown(self, distance_m, width_m, required_percentage):
         """
         Checks the percentage of unknown cells (-1) within a rectangular window
         in front of the robot.
