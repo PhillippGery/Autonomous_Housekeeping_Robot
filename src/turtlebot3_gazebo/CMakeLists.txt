@@ -75,7 +75,7 @@ install(
   PROGRAMS
     src/lab4/spawn_objects.py
   DESTINATION lib/${PROJECT_NAME}
-  RENAME spawn_objects
+  #RENAME spawn_objects
 )
 install(
   PROGRAMS
@@ -88,14 +88,14 @@ install(
   PROGRAMS
     src/lab4/static_obstacles.py
   DESTINATION lib/${PROJECT_NAME}
-  RENAME static_obstacles
+  #RENAME static_obstacles
 )
 
 install(
   PROGRAMS
     src/lab4/static_obstacles_task3.py
   DESTINATION lib/${PROJECT_NAME}
-  RENAME static_obstacles_task3
+  #RENAME static_obstacles_task3
 )
 
 ################################################################################

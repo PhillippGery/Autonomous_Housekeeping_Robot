@@ -58,7 +58,7 @@ class Task2(Node):
         self.current_retreat_distance = 0.0 # Tracker for retreat distance 
         self.retreat_speed = -0.15          # Reverse linear speed (m/s)
       
-        inflation_kernel_size = 10
+        self.inflation_kernel_size = 10
         self.max_dist_alternate_Ponit = 1.0  # if start or stop pose is not valid, search for alternate point within this distance (meters)
         self.max_angle_alpha_to_startdrive = 1.0  # radian (57 degrees)
         
@@ -87,7 +87,7 @@ class Task2(Node):
 
         self.get_logger().info(f"Loading map from '{map_yaml_path}' and building graph...")
         self.map_processor = MapProcessor(map_yaml_path)
-        inflation_kernel = self.map_processor.rect_kernel(inflation_kernel_size, 1)
+        inflation_kernel = self.map_processor.rect_kernel(self.inflation_kernel_size, 1)
         self.map_processor.inflate_map(inflation_kernel)
         self.map_processor.get_graph_from_map()
         self.get_logger().info("Graph built successfully.")
@@ -430,19 +430,21 @@ class Task2(Node):
                 # Haven't moved far enough back yet.
                 self.move_ttbot(self.retreat_speed, 0.0) # Move backward (speed is negative)
                 self.current_retreat_distance += distance_moved
-                self.get_logger().warn(f"Retreating: {self.current_retreat_distance:.3f} / {abs(self.retreat_distance):.3f} m", throttle_duration_sec=0.1)
+                #self.get_logger().warn(f"Retreating: {self.current_retreat_distance:.3f} / {abs(self.retreat_distance):.3f} m", throttle_duration_sec=0.1)
                 return # Skip path following
             else:
                 # Retreat distance met. Stop and transition to REPLANNING.
                 self.move_ttbot(0.0, 0.0) # Ensure robot is stopped
                 self.get_logger().info("Retreat complete. Transitioning to REPLANNING.")
+                self.recalculate_obstacle_position()
                 self.obstacle_state = 'REPLANNING'
-                self.replan_with_obstacle()
+                
                 # After setting the state, the next cycle of _check_for_obstacles will call replan_with_obstacle.
                 return
         
 
         if self.obstacle_state == 'REPLANNING':
+            self.replan_with_obstacle()
             self.move_ttbot(0.0, 0.0)
             return
         
@@ -584,54 +586,36 @@ class Task2(Node):
         if self.ttbot_pose is None or self.goal_pose is None:
             return
         
+        self.scan_msg = scan_msg
+        
         # Process laser scan data
         ranges = np.array(scan_msg.ranges)
         ranges[np.isinf(ranges)] = np.nan
         ranges[ranges == 0.0] = np.nan
-        front_slice = np.concatenate((ranges[0:20], ranges[340:360]))
+        self.front_slice = np.concatenate((ranges[0:28], ranges[332:360]))
         
         try:
-            front_dist = np.nanmin(front_slice)
+            self.front_dist = np.nanmin(self.front_slice)
             #self.get_logger().info(f"Minimum front distance: {front_dist:.2f} m")
         except ValueError:
             # happens if all readings in a slice are 'nan'
             self.get_logger().warn("laser readings are 'nan'. Skipping loop.", throttle_duration_sec=1)
             return
         
-        obstacle_close = front_dist < self.min_front_obstacle_distance
+        obstacle_close = self.front_dist < self.min_front_obstacle_distance
 
         if obstacle_close and self.obstacle_state == 'CLEAR':
             # 1. New unmapped obstacle detected!
+            self.get_logger().warn(f"Obstacle detected at {self.front_dist:.2f} m! Initiating avoidance maneuvers.")
             self.state = 'OBSTACLE_AVOIDANCE'
-            self.obstacle_state = 'DETECTED'
+            self.obstacle_state = 'RETREATING'
             self.move_ttbot(0.0, 0.0) # Stop immediately
-
             self.current_retreat_distance = 0.0
-            self.retreat_angle = 0.0
 
-            obstacle_range_idx = np.nanargmin(front_slice)
-            
-            quat = self.ttbot_pose.pose.orientation
-            siny_cosp = 2 * (quat.w * quat.z + quat.x * quat.y)
-            cosy_cosp = 1 - 2 * (quat.y * quat.y + quat.z * quat.z)
-            robot_theta = math.atan2(siny_cosp, cosy_cosp)
-
-            R_obs = self.obstacle_inflation_radius_m
-            distance_to_center = front_dist + R_obs
-            
-            # calculate obstacle position in world frame
-            obs_world_x = self.ttbot_pose.pose.position.x + distance_to_center * math.cos(robot_theta)
-            obs_world_y = self.ttbot_pose.pose.position.y + distance_to_center * math.sin(robot_theta)
-            
-            self.obstacle_pos_world = (obs_world_x, obs_world_y)
-            
-            self.get_logger().warn(f"Unmapped obstacle detected at {front_dist:.2f}m. Triggering replanning.")
-            self.get_logger().info(f"Estimated obstacle position (world): x={obs_world_x:.2f}, y={obs_world_y:.2f}")
-            
+             
         if self.obstacle_state == 'DETECTED':
             self.current_retreat_distance = 0.0
             self.obstacle_state = 'RETREATING'
-
 
     def replan_with_obstacle(self):
         """!
@@ -640,10 +624,14 @@ class Task2(Node):
 
         obs_grid_coords = self._world_to_grid(self.obstacle_pos_world)
         obs_y, obs_x = obs_grid_coords
+
+        static_safety_buffer_m = self.inflation_kernel_size * self.map_processor.map.resolution
+
+        total_radius_m = (self.estimated_diameter / 2.0) + static_safety_buffer_m
         
 
         resolution = self.map_processor.map.resolution
-        pixel_radius = int(self.obstacle_inflation_radius_m / resolution)
+        pixel_radius = int(total_radius_m / resolution)
         
         self.get_logger().info(f"Adding obstacle to map at grid pos ({obs_y}, {obs_x}) with radius {pixel_radius} cells.")
         
@@ -698,6 +686,102 @@ class Task2(Node):
         self.initial_pose_pub.publish(pose_msg)
 
         self.initial_pose_timer.cancel()
+
+    def recalculate_obstacle_position(self):
+
+
+
+        obstacle_slice_index = np.nanargmin(self.front_slice)
+
+        if obstacle_slice_index < 28:
+            full_scan_index = obstacle_slice_index
+        else:
+            full_scan_index = 332 + (obstacle_slice_index - 28)
+
+        ranges = np.array(self.scan_msg.ranges) # Use raw ranges array
+        idx_start, idx_end = self._find_obstacle_cluster_bounds(
+            ranges, 
+            full_scan_index, jump_threshold=0.4)
+        
+        angular_width_rad = (idx_end - idx_start + 1) * self.scan_msg.angle_increment
+
+
+        center_index = int((idx_start + idx_end) / 2)
+        angle_from_robot_centerline = center_index * self.scan_msg.angle_increment + self.scan_msg.angle_min
+
+        cluster_ranges = ranges[idx_start:idx_end + 1]
+        obs_dist = np.nanmean(cluster_ranges)
+
+        self.estimated_diameter = self.estimate_obstacle_diameter(angular_width_rad, obs_dist)
+        self.get_logger().info(f"Angle to obstacle center: {math.degrees(angle_from_robot_centerline):.2f} degrees")
+        self.get_logger().info(f"Estimated obstacle diameter: {self.estimated_diameter:.2f} m")
+
+        
+        quat = self.ttbot_pose.pose.orientation
+        siny_cosp = 2 * (quat.w * quat.z + quat.x * quat.y)
+        cosy_cosp = 1 - 2 * (quat.y * quat.y + quat.z * quat.z)
+        robot_theta = math.atan2(siny_cosp, cosy_cosp)
+
+        R_obs = self.estimated_diameter / 2.0
+        distance_to_center = obs_dist + R_obs
+        
+        world_angle_to_center = robot_theta + angle_from_robot_centerline 
+        
+        # calculate obstacle position in world frame
+        obs_world_x = self.ttbot_pose.pose.position.x + distance_to_center * math.cos(world_angle_to_center)
+        obs_world_y = self.ttbot_pose.pose.position.y + distance_to_center * math.sin(world_angle_to_center)
+        
+        self.obstacle_pos_world = (obs_world_x, obs_world_y)
+        
+        self.get_logger().warn(f"Unmapped obstacle detected at {self.front_dist:.2f}m. Triggering replanning.")
+        self.get_logger().info(f"Estimated obstacle position (world): x={obs_world_x:.2f}, y={obs_world_y:.2f}")
+        
+    def estimate_obstacle_diameter(self, delta_angle_rad, distance_m):
+        """
+        Estimates the diameter (chord length) of an object using its angular width and distance.
+        """
+        if distance_m <= 0 or delta_angle_rad <= 0:
+            return 0.0
+
+        # Formula: L = 2 * R * sin(Delta_theta / 2)
+        estimated_diameter = 2 * distance_m * math.sin(delta_angle_rad / 2.0)
+        
+        return estimated_diameter
+
+    def _find_obstacle_cluster_bounds(self, ranges, min_index, jump_threshold):
+        """
+        Dynamically finds the start and end indices of the obstacle cluster 
+        centered around the minimum distance reading.
+        
+        @param ranges: The full 360-degree Lidar ranges array.
+        @param min_index: The index of the minimum distance reading (front_dist).
+        @param jump_threshold: The meter difference to signal an object edge.
+        @return: (index_start, index_end) in the ranges array.
+        """
+        num_readings = len(ranges)
+        
+        # --- 1. Find Start Index (Scan backward from min_index) ---
+        index_start = min_index
+        for i in range(min_index, 0, -1):
+            # Stop if distance jumps significantly
+            if abs(ranges[i] - ranges[i - 1]) > jump_threshold:
+                index_start = i
+                break
+        
+        # --- 2. Find End Index (Scan forward from min_index) ---
+        index_end = min_index
+        for i in range(min_index, num_readings - 1):
+            # Stop if distance jumps significantly
+            if abs(ranges[i + 1] - ranges[i]) > jump_threshold:
+                index_end = i
+                break
+        
+        # Basic wrap-around check for simplicity (assumes obstacle is in the front slice)
+        if index_start == min_index and index_end == min_index:
+            # If no jump found, object might be large, use a default range (e.g., 20 indices wide)
+            pass 
+
+        return index_start, index_end
 
 
 class Queue():

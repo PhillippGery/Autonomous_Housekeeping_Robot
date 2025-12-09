@@ -57,7 +57,7 @@ def generate_launch_description():
         # Conditionally enable dynamics obstacles if the argument is set to "true"
         Node(
             package='turtlebot3_gazebo',
-            executable='static_obstacles',
+            executable='static_obstacles.py',
             name='static_obstacles',
             output='screen',
             condition=IfCondition(LaunchConfiguration('static_obstacles'))
@@ -65,7 +65,7 @@ def generate_launch_description():
 
         Node(
             package='turtlebot3_gazebo',
-            executable='spawn_objects',
+            executable='spawn_objects.py',
             name='spawn_objects',
             output='screen',
             condition=IfCondition(LaunchConfiguration('spawn_objects'))
@@ -73,7 +73,7 @@ def generate_launch_description():
 
         Node(
             package='turtlebot3_gazebo',
-            executable='static_obstacles_task3',
+            executable='static_obstacles_task3.py',
             name='static_obstacles_task3',
             output='screen',
             condition=IfCondition(LaunchConfiguration('spawn_objects'))
@@ -135,7 +135,7 @@ def generate_launch_description():
 
         Node(
             package='turtlebot3_gazebo',
-            executable='task2_bonus',
+            executable='task2_bonus.py',
             name='task2bonus_algorithm',
             output='screen',
             parameters=[{
@@ -156,7 +156,7 @@ def generate_launch_description():
         # Task3 Algorithm Node (for dynamic obstacles)
         Node(
             package='turtlebot3_gazebo',
-            executable='task3',
+            executable='task3.py',
             name='task3_algorithm',
             output='screen',
             parameters=[{

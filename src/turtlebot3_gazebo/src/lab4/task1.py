@@ -19,6 +19,7 @@ from ament_index_python.packages import get_package_share_directory
 from PIL import Image
 import yaml
 import pandas as pd
+from math import sqrt
 
 from copy import copy
 import time
@@ -59,7 +60,7 @@ class Task1(Node):
         self.map_initialized = False # Flag to track if the map has been initialized
 
 
-        # Wait for map to be ready
+        # Frontier exploration variables
         self.map_processor = SLAMMapProcessor() # Initialize with the new SLAM map placeholder
         self.get_logger().info("SLAM processor initialized. Waiting for /map data...")
         self.FLg_NO_Angle_Alignment = True  # If true, the robot will not align to the goal orientation upon arrival
@@ -67,12 +68,28 @@ class Task1(Node):
         self.rejected_goals_grid = [] # List to store rejected goal grid coordinates
         self.Frotier_Counter = 0
         self.Frontier_W_dist = 1.0
-        self.Frontier_W_power = 5.0 
+        self.Frontier_W_power = 4.0 
         self.min_frontier_distance = 0.6  # meters
         self.search_radius_cells = 7  # cells
         self.min_free_neighbors_for_frontier = 3  # Minimum free neighbors required for a frontier cell
 
-        self.inflation_kernel_size = 5
+
+        # Wall following variables
+        self.min_side_distance = 1.0  # Meters to trigger wall following
+        self.min_time_in_narrow_space = 2.0  # Seconds to trigger wall following
+        self.In_narrow_space = False
+        self.wall_follower = WallFollower(
+            self.get_logger(),  
+            desired_distance=0.5, 
+            kp=1.2, 
+            ki=0.0, 
+            kd=0.4,
+            max_angular_speed=1.3,
+            max_linear_speed=0.2
+        )
+
+    
+        self.inflation_kernel_size = 6  # Size of the inflation kernel (should be odd)
         self.max_dist_alternate_Ponit = 1.5  # if start or stop pose is not valid, search for alternate point within this distance (meters)
         self.max_angle_alpha_to_startdrive = 1.0  # radian (57 degrees)
         
@@ -89,10 +106,10 @@ class Task1(Node):
         self.lookahead_ratio = 0.5     # How much the lookahead increases with speed
 
         # Speed and tolerance settings
-        self.speed_max = 0.31
+        self.speed_max = 0.46
         self.rotspeed_max = 1.9
         self.goal_tolerance = 0.1
-        self.align_threshold = 0.4
+        self.align_threshold = 0.5
 
         self.last_commanded_speed = 0.0
         self.use_dynamic_lookahead = True # Enable dynamic lookahead based on speed
@@ -470,7 +487,6 @@ class Task1(Node):
             if self.map_initialized: # Make sure map is ready
                 self.map_processor.get_graph_from_map()           
 
-
             frontier_points = self._find_frontiers()
             self._select_and_set_goal(frontier_points)
             
@@ -512,10 +528,11 @@ class Task1(Node):
             # Check if we have reached the final goal position and orientation
             self.Check_alingment_Goal( final_goal_pose)
 
-        elif self.state == 'STRAIGHT_MOVING':
-            # Continue moving straight until obstacle is cleared
-            if self.obstacle_state == 'CLEAR':
-                self.move_ttbot(0.15, 0.0) # Move forward at a safe speed
+        elif self.state == 'WALL_FOLLOWING':
+            # Wallfollower in narrow spaces
+            current_time = self.get_clock().now()
+            linear_speed, angular_speed = self.wall_follower.compute_velocities(self.scan_msg, current_time)
+            self.move_ttbot(float(linear_speed), float(angular_speed))
             
         
         else:
@@ -659,21 +676,61 @@ class Task1(Node):
         """
         if self.ttbot_pose is None or self.goal_pose is None:
             return
+
+        self.scan_msg = scan_msg
         
         # Process laser scan data
         ranges = np.array(scan_msg.ranges)
         ranges[np.isinf(ranges)] = np.nan
         ranges[ranges == 0.0] = np.nan
         front_slice = np.concatenate((ranges[0:25], ranges[335:360]))
+        right_slice = ranges[75:105]
+        left_slice = ranges[255:285]
         
         try:
             front_dist = np.nanmin(front_slice)
+            right_dist = np.nanmin(right_slice)
+            left_dist = np.nanmin(left_slice)
             #self.get_logger().info(f"Minimum front distance: {front_dist:.2f} m")
         except ValueError:
             # happens if all readings in a slice are 'nan'
             self.get_logger().warn("laser readings are 'nan'. Skipping loop.", throttle_duration_sec=1)
             return
         
+        # Check for narrow spaces
+        narrow_space_detected = (right_dist < self.min_side_distance) and \
+                        (left_dist < self.min_side_distance)
+        
+        if narrow_space_detected:
+    
+            # 1. Start the timer if we just entered the narrow space
+            if not self.In_narrow_space:
+                self.In_narrow_space = True
+                self.enter_time = self.get_clock().now()
+                
+            if self.state != 'WALL_FOLLOWING' and self.enter_time is not None:
+                time_in_narrow_space = (self.get_clock().now() - self.enter_time).nanoseconds * 1e-9
+                is_area_unknown = self._check_area_ahead_unknown(distance_m=1.5, width_m=0.5, required_percentage=40.0)
+                
+                if time_in_narrow_space >= self.min_time_in_narrow_space:
+                    if is_area_unknown: 
+                        self.get_logger().warn("Narrow space confirmed. Switching to WALL_FOLLOWING mode.")
+                        self.state = 'WALL_FOLLOWING'
+                        self.enter_time = None # Reset timer after transition
+                    
+                   
+        else:
+
+            # If robot was in narrow space, reset the flags/timer
+            if self.In_narrow_space:
+                self.get_logger().info("Exiting narrow space detection zone.")
+                self.In_narrow_space = False
+                self.enter_time = None
+                
+            if self.state == 'WALL_FOLLOWING':
+                self.get_logger().info("Exiting WALL_FOLLOWING mode. Resuming primary mission.")
+                self.state = 'IDLE' # Transition back to IDLE to trigger new frontier selection/path planning
+                
         obstacle_close = front_dist < self.min_front_obstacle_distance
 
         if obstacle_close and self.obstacle_state == 'CLEAR':
@@ -905,14 +962,6 @@ class Task1(Node):
                  # Information Gain Term (Total Cost is minimized)
                  information_gain_term = self.Frontier_W_power / area_gain_cells
 
-            
-            # Avoid division by zero if a strange count occurs
-            # if count == 0:
-            #      information_gain_term = 0 
-            # else:
-            #      information_gain_term = self.Frontier_W_power / count 
-            
-            # Total Cost: We are aiming to MINIMIZE this value
             total_cost = (self.Frontier_W_dist * distance) + information_gain_term
 
             # Select Best Goal
@@ -935,12 +984,17 @@ class Task1(Node):
         else:
 
             #if less then 1% of the map is unknown consider exploration complete
+            # Calculate total cells, including Unknown, Free, and Occupied
             total_cells = self.raw_map_data_array.size
             unknown_cells = np.sum(self.raw_map_data_array == -1)
-            unknown_percentage = (unknown_cells / total_cells) * 100.0
+            known_cells = total_cells - unknown_cells
+            if known_cells == 0:
+                unknown_percentage_vs_known = 100.0
+            else:
+                unknown_percentage_vs_known = (unknown_cells / known_cells) * 100.0
 
-            self.get_logger().info(f"Unknown Map Percentage: {unknown_percentage:.2f}%")
-            if unknown_percentage < 1.0:
+            self.get_logger().info(f"Unknown Map Percentage (vs Known): {unknown_percentage_vs_known:.2f}%")
+            if unknown_percentage_vs_known < 1.0:
                 self.get_logger().warn("Exploration Complete: Less than 1% of the map is unknown.")
                 # print exproation time
                 time = (self.get_clock().now().nanoseconds*1e-9 - self.exploration_start_time)/60.0
@@ -949,10 +1003,8 @@ class Task1(Node):
                 self.state = 'MAP_EXPLORED'
             else:
                 self.get_logger().info("No valid frontier goal found. All candidates rejected or unreachable.")
-                self.get_logger().info("Moving TTBot forward to explore further.")
-                self.state = 'STRAIGHT_MOVING'
-                
 
+                
     def _calculate_local_area_gain(self, i, j):
         """
         Calculates Information Gain by counting unknown (-1) cells within a 
@@ -1018,6 +1070,70 @@ class Task1(Node):
         
         return len(pathnames) # Returns float('inf') if no path is found
 
+    def _check_area_ahead_unknown(self, distance_m=1.5, width_m=0.5, required_percentage=40.0):
+        """
+        Checks the percentage of unknown cells (-1) within a rectangular window
+        in front of the robot.
+        """
+        if self.ttbot_pose is None or self.raw_map_data_array is None:
+            return False # Cannot determine unknown status
+
+        raw_data = self.raw_map_data_array
+        H, W = raw_data.shape
+        resolution = self.map_processor.map.resolution
+        
+        # Convert meter dimensions to cell dimensions
+        dist_cells = int(distance_m / resolution)
+        width_cells = int(width_m / resolution)
+        
+        # Get the robot's current grid coordinates (i, j)
+        robot_i, robot_j = self._world_to_grid(
+            (self.ttbot_pose.pose.position.x, self.ttbot_pose.pose.position.y)
+        )
+        
+        # Calculate the robot's current yaw (theta)
+        quat = self.ttbot_pose.pose.orientation
+        siny_cosp = 2 * (quat.w * quat.z + quat.x * quat.y)
+        cosy_cosp = 1 - 2 * (quat.y * quat.y + quat.z * quat.z)
+        robot_theta = math.atan2(siny_cosp, cosy_cosp)
+        
+        # --- 2. Calculate Window Corners (Approximation for performance) ---
+        
+        # We define a target point ahead of the robot
+        target_x = self.ttbot_pose.pose.position.x + dist_cells * resolution * math.cos(robot_theta)
+        target_y = self.ttbot_pose.pose.position.y + dist_cells * resolution * math.sin(robot_theta)
+        
+        # Convert target back to grid
+        target_i, target_j = self._world_to_grid((target_x, target_y))
+        
+        # Define a simplified search window based on the bounding box between robot and target
+        min_i = min(robot_i, target_i) - width_cells
+        max_i = max(robot_i, target_i) + width_cells
+        min_j = min(robot_j, target_j) - width_cells
+        max_j = max(robot_j, target_j) + width_cells
+        
+        # Clamp window to map bounds
+        min_i = max(0, min_i)
+        max_i = min(H, max_i)
+        min_j = max(0, min_j)
+        max_j = min(W, max_j)
+        
+        if max_i <= min_i or max_j <= min_j:
+             return False 
+             
+        window = raw_data[min_i:max_i, min_j:max_j]
+        
+        total_window_cells = window.size
+        unknown_cells = np.sum(window == -1)
+        
+        if total_window_cells == 0:
+            return False
+
+        unknown_percentage = (unknown_cells / total_window_cells) * 100.0
+        
+        self.get_logger().info(f"Ahead Unknown: {unknown_percentage:.1f}% ({unknown_cells} cells)", throttle_duration_sec=1.0)
+        
+        return unknown_percentage >= required_percentage
 
 class MapData:
     def __init__(self):
@@ -1089,6 +1205,7 @@ class SLAMMapProcessor:
                     if ((i < (H - 1)) and (j < (W - 1))) and self.inf_map_img_array[i+1][j+1] == 0: 
                         child_dw_rg = self.map_graph.g['%d,%d'%(i+1,j+1)]
                         self.map_graph.g['%d,%d'%(i,j)].add_children([child_dw_rg],[np.sqrt(2)])
+
 
     def _modify_map_pixel(self, map_array, i, j, value, absolute):
         H, W = map_array.shape
@@ -1283,7 +1400,144 @@ class AStar():
         # path is reverse, so flip it 
         return path[::-1], dist
     
+class WallFollower:
+    """
+    PID-based wall-following algorithm.
+    
+    maintaining  a fixed distance 
+    from a wall on the robot's right side. 
+    turn left if an obstacle is detected directly in front.
 
+    idee from:
+    https://andrewyong7338.medium.com/maze-escape-with-wall-following-algorithm-170c35b88e00
+    """
+    
+    def __init__(self, logger, desired_distance=0.5, kp=1.0, ki=0.01, kd=0.2 , max_angular_speed=1.2, max_linear_speed=0.8):
+        
+        self.logger = logger #allow logger in non ros pyton file
+
+        #PID Gains
+        self.kp = kp
+        self.ki = ki
+        self.kd = kd
+        
+        #PID State
+        self.integral = 0.0
+        self.prev_error = 0.0
+        self.last_time = None
+        self.obstactle_infront = False
+        
+        #Controller Setpoints
+        self.desired_distance = desired_distance  # Target distance from wall (meters)
+        self.safety_distance = 0.4                # Stop and turn if obstacle is this close (meters)
+        self.safety_Side_distance = 0.4           # Min distance to wall on the side (meters)
+        self.forward_speed = max_linear_speed     # Constant speed to move forward (m/s)
+        self.turning_speed = 1.2                  # Speed to turn at when avoiding obstacle (rad/s)
+        self.max_angular_speed = max_angular_speed              # Max angular speed for PID (rad/s)
+
+    def compute_velocities(self, scan_msg, current_time):
+        """
+        LaserScan msg to  get dis to walls and maintain the dis
+        Twist message to follow the wall on the right.
+        """
+        
+        
+        #  dt
+        if self.last_time is None:
+            self.last_time = current_time
+            return 0.0, 0.0 #for 0 = 0
+            
+        dt = (current_time - self.last_time).nanoseconds / 1e9
+        self.last_time = current_time
+        
+        if dt == 0.0:
+            return  0.0, 0.0 # Avoid division by zero
+
+        # Scan Sensor ranges --> valid processing
+        ranges = np.array(scan_msg.ranges)
+        ranges[np.isinf(ranges)] = np.nan
+        ranges[ranges == 0.0] = np.nan
+        
+        #Take slices because of noice readings --> more Robust
+        # Front
+        front_slice = np.concatenate((ranges[0:20], ranges[345:360]))
+        
+        # Right
+        right_slice = ranges[260:295]
+        
+        # Angled (45 deg right)
+        angled_slice = ranges[310:320]
+
+
+        try:
+            front_dist = np.nanmin(front_slice)
+            right_dist = np.nanmin(right_slice)
+            angled_dist = np.nanmin(angled_slice)
+
+
+        except ValueError:
+            # This happens if all readings in a slice are 'nan'
+            self.logger.warn("laser readings are 'nan'. Skipping loop.", throttle_duration_sec=1)
+            return 0.0, 0.0 
+
+        # angled sensor -->primary distance if Not valid --> side sensor
+        # if Side distance to small --> no use angled sensor
+        if not np.isnan(angled_dist) and right_dist > self.safety_Side_distance:
+            # if 45-degree distance invalid --> 90-degree distance
+            control_dist = angled_dist / sqrt(2)
+        elif not np.isnan(right_dist) and right_dist < 1.5:
+            control_dist = right_dist
+        else:
+            # NO right-side sensors  drive straight
+            self.logger.info("No rrigth wall found", throttle_duration_sec=1)
+            linear_speed = self.forward_speed * 0.5
+            if np.isnan(angled_dist):
+                angular_speed = -self.turning_speed * 0.1 # Turn right
+            else:
+                angular_speed = -self.turning_speed * 0.0 # Turn right
+            return linear_speed, angular_speed
+            
+
+        # STATE 1: Obstacle in Front 
+        # If the front is blocked, stop moving forward and turn left.
+        if front_dist < self.safety_distance: # or collAvoid_dist < self.safety_Side_distance:
+            self.logger.warn("Obstacle in front! Turning left.", throttle_duration_sec=1)
+  
+            linear_speed = 0.0
+            angular_speed = self.turning_speed
+            self.reset_pid() # res PID --> wind up       
+            
+        # STATE 2: Follow the Wall (PID Control)
+        # If the front clear, move forward and use PID to adjust angle.
+        else:
+            kp_fw = np.clip((front_dist - self.safety_distance) / 1.0, 0.4, 1.0)
+            
+            linear_speed = self.forward_speed * kp_fw
+            
+            # error
+            error = self.desired_distance - control_dist
+            
+            # Update PID terms
+            self.integral += error * dt
+            # Anti-windup
+            self.integral = np.clip(self.integral, -1.0, 1.0)
+            derivative = (error - self.prev_error) / dt
+            
+            # PID Output
+            pid_output = (self.kp * error) + (self.ki * self.integral) + (self.kd * derivative)
+            
+            # Set the angular velocity, clamping it to the maximum
+            angular_speed = np.clip(pid_output, -self.max_angular_speed, self.max_angular_speed)
+            
+            self.prev_error = error
+
+        return linear_speed, angular_speed
+
+    def reset_pid(self):
+        """Call this when switching away from the wall follower to reset PID state."""
+        self.integral = 0.0
+        self.prev_error = 0.0
+        self.last_time = None
 
 def main(args=None):
     rclpy.init(args=args)
