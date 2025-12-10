@@ -65,7 +65,7 @@ class GazeboModelHandler(Node):
     def timer_callback(self):
         t = self.elapsed
         y0 = 0.5
-        y1 = -0.7
+        y1 = -0.45
 
  
         self.set_model_position(-3.75, y0, 'obstacle0')

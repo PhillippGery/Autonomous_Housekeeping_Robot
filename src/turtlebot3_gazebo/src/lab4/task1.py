@@ -52,8 +52,10 @@ class Task1(Node):
         #Obstacle avoidance variables
         self.obstacle_state = 'CLEAR'
         self.min_front_obstacle_distance = 0.35  # Meters
+        self.min_back_obstacle_distance = 0.25   # Meters
+        self.safety_distance = 0.2              # Meters
         self.obstacle_inflation_radius_m = 0.4
-        self.retreat_distance = -0.15      # Distance to retreat in meters 
+        self.retreat_distance = -0.25      # Distance to retreat in meters 
         self.current_retreat_distance = 0.0 # Tracker for retreat distance 
         self.retreat_speed = -0.15          # Reverse linear speed (m/s)
 
@@ -71,7 +73,10 @@ class Task1(Node):
         self.Frontier_W_power = 3.0 
         self.min_frontier_distance = 0.6  # meters
         self.search_radius_cells = 7  # cells
-        self.min_free_neighbors_for_frontier = 4  # Minimum free neighbors required for a frontier cell
+        self.min_free_neighbors_for_frontier = 5  # Minimum free neighbors required for a frontier cell
+        self.Contrains_Relaxed = False
+        self.FinalGoal_Origin_Set = False
+        self.last_known_cells_count = 0
 
 
         # Wall following variables
@@ -91,7 +96,7 @@ class Task1(Node):
     
         self.inflation_kernel_size = 4  # Size of the inflation kernel (should be odd)
         self.max_dist_alternate_Ponit = 1.5  # if start or stop pose is not valid, search for alternate point within this distance (meters)
-        self.max_angle_alpha_to_startdrive = 1.0  # radian (57 degrees)
+        self.max_angle_alpha_to_startdrive = 55/180 * math.pi 
         
         self.k_rho = 0.8608         # Proportional gain for linear speed
         self.kp_angular = 2.0747    # Proportional gain for angular velocity
@@ -189,6 +194,8 @@ class Task1(Node):
             self.shortcut_active = False
             self.state = 'ASTARPATH_FOLLOWING'
             self.obstacle_state = 'CLEAR'
+            self.integral_error_angular = 0.0
+            self.previous_error_angular = 0.0
             
         else:
             self.get_logger().warn("A* failed to find a path to the goal.")
@@ -506,14 +513,22 @@ class Task1(Node):
                 # Haven't moved far enough back yet.
                 self.move_ttbot(self.retreat_speed, 0.0) # Move backward (speed is negative)
                 self.current_retreat_distance += distance_moved
-                self.get_logger().warn(f"Retreating: {self.current_retreat_distance:.3f} / {abs(self.retreat_distance):.3f} m", throttle_duration_sec=0.1)
+                #self.get_logger().warn(f"Retreating: {self.current_retreat_distance:.3f} / {abs(self.retreat_distance):.3f} m", throttle_duration_sec=0.1)
+                # if obstacle in frońt and behind, return to IDLE
+                if self.obstacle_behind:
+                    self.obstacle_state = 'CLEAR'
+                    self.state = 'IDLE'
+                    self.get_logger().warn("Obstacle still behind during retreat", throttle_duration_sec=1.0)
+
                 return # Skip path following
+            
             else:
                 # Retreat distance met. Stop and transition to REPLANNING.
                 self.move_ttbot(0.0, 0.0) # Ensure robot is stopped
                 self.get_logger().info("Retreat complete. Transitioning to REPLANNING.")
                 self.obstacle_state = 'CLEAR'
                 self.state = 'IDLE'
+                self.FinalGoal_Origin_Set = False
                 return
 
         elif self.state == 'ASTARPATH_FOLLOWING':
@@ -592,7 +607,7 @@ class Task1(Node):
                 self.integral_error_angular = 0.0
                 self.previous_error_angular = 0.0
                 self.Frotier_Counter += 1
-                self.rejected_goals_grid = []
+                #self.rejected_goals_grid = []
                 self.get_logger().info(f"Frontier Goals Reached So Far: {self.Frotier_Counter}")
                 return
             else:
@@ -688,11 +703,15 @@ class Task1(Node):
         front_slice = np.concatenate((ranges[0:28], ranges[332:360]))
         right_slice = ranges[75:105]
         left_slice = ranges[255:285]
+        back_slice = ranges[160:220]
+        safety_slice = np.concatenate((ranges[0:90], ranges[270:360]))
         
         try:
             front_dist = np.nanmin(front_slice)
             right_dist = np.nanmin(right_slice)
             left_dist = np.nanmin(left_slice)
+            back_dist = np.nanmin(back_slice)
+            safety_dist = np.nanmin(safety_slice)
             #self.get_logger().info(f"Minimum front distance: {front_dist:.2f} m")
         except ValueError:
             # happens if all readings in a slice are 'nan'
@@ -715,7 +734,7 @@ class Task1(Node):
                 
                 
                 if time_in_narrow_space >= self.min_time_in_narrow_space:
-                    is_area_unknown = self._check_area_ahead_unknown(distance_m=1.0, width_m=0.5, required_percentage=40.0)
+                    is_area_unknown = self._check_area_ahead_unknown(distance_m=1.0, width_m=0.5, required_percentage=40.0, wall_threshold_percentage=5.0)
                     if is_area_unknown: 
                         self.get_logger().warn("Narrow space confirmed. Switching to WALL_FOLLOWING mode.")
                         self.state = 'WALL_FOLLOWING'
@@ -735,6 +754,8 @@ class Task1(Node):
                 self.state = 'IDLE' # Transition back to IDLE to trigger new frontier selection/path planning
                 
         obstacle_close = front_dist < self.min_front_obstacle_distance
+        self.obstacle_behind = back_dist < self.min_back_obstacle_distance
+        self.safety_dist_critical = safety_dist < self.safety_distance
 
         if obstacle_close and self.obstacle_state == 'CLEAR':
             # 1. New unmapped obstacle detected!
@@ -743,11 +764,16 @@ class Task1(Node):
             self.get_logger().warn(f"Obstacle detected at {front_dist:.2f} m! Initiating avoidance maneuver.")
             self.obstacle_state = 'RETREATING'
             self.current_retreat_distance = 0.0
-            # start_world = (self.goal_pose.pose.position.x, self.goal_pose.pose.position.y)
-            # end_grid = self._world_to_grid(start_world)
-            # grid_name = f"{end_grid[0]},{end_grid[1]}"
-            # self.rejected_goals_grid.append(grid_name)
-            #  # Clear rejected goals if new obstacle found
+        elif self.safety_dist_critical and self.obstacle_state == 'CLEAR':
+            # Emergency stop if something is too close in safety zones
+            self.state = 'OBSTACLE_AVOIDANCE'
+            self.move_ttbot(0.0, 0.0) # Stop immediately
+            self.get_logger().warn(f"Critical obstacle detected at {safety_dist:.2f} m in safety zone! Initiating avoidance maneuver.")
+            self.obstacle_state = 'RETREATING'
+            self.current_retreat_distance = 0.0
+
+        
+
 
 
     def publish_initial_pose(self):
@@ -857,16 +883,27 @@ class Task1(Node):
                 absolute=True
             )
             
-        # Final cleanup: Ensure no temporary values remain (already handled by _modify_map_pixel, 
-        # but left here for safety/consistency).
+
         self.map_processor.inf_map_img_array[self.map_processor.inf_map_img_array > 0] = 1
+
+        # if map is actually growing with update reset the rejected goals
+        
 
 
         # 4. Finalize Graph and State
         # Regenerate Graph
         self.map_processor.get_graph_from_map()
         self.frontier_points = self._find_frontiers()
-        #self.rejected_goals_grid = [] # Clear rejected goals if new goal was found
+
+        current_known_cells = np.sum((self.raw_map_data_array == 0) | (self.raw_map_data_array == 100))
+        # Check if the map has significantly grown since the last update
+        if current_known_cells > self.last_known_cells_count + 20: 
+            if len(self.rejected_goals_grid) > 0:
+                self.get_logger().info(f"Map grown significantly ({current_known_cells} vs {self.last_known_cells_count}). Resetting {len(self.rejected_goals_grid)} rejected goals.")
+                self.rejected_goals_grid = [] # Clear rejected goals
+        self.last_known_cells_count = current_known_cells
+
+
 
         if not self.map_initialized:
             self.get_logger().info(f"Initial SLAM map received (H:{H}, W:{W}). A* graph built.")
@@ -913,7 +950,7 @@ class Task1(Node):
                                 # Count adjacent known/free cells
                                 free_neighbor_count += 1 
                                 
-                    if is_frontier and free_neighbor_count >= MIN_FREE_NEIGHBORS: # ⚠️ NEW THRESHOLD CHECK
+                    if is_frontier and free_neighbor_count >= MIN_FREE_NEIGHBORS: 
                         # Append the coordinates and the count of unknown neighbors
                         frontiers.append((i, j, unknown_neighbor_count))
                         
@@ -982,6 +1019,7 @@ class Task1(Node):
         if best_goal_pose:
             self.get_logger().info(f"Selected new frontier goal. Cost: {min_cost:.2f}")
             self.__goal_pose_cbk(best_goal_pose)
+            self.FinalGoal_Origin_Set = False
             
             
         else:
@@ -989,28 +1027,44 @@ class Task1(Node):
             #if less then 1% of the map is unknown consider exploration complete
             # Calculate frontier Points in corelation to known map area
             frontier_points_count = len(frontier_points)
+            
             known_cells = np.sum((self.raw_map_data_array == 0) | (self.raw_map_data_array == 100))
             unknown_percentage_vs_known = (frontier_points_count / known_cells) * 100.0        
             
-            self.get_logger().info(f"Unknown Map Percentage (vs Known): {unknown_percentage_vs_known:.2f}%")
-
-            if unknown_percentage_vs_known < 0.05:
-                self.get_logger().warn("Exploration Complete: Less than 0.05% of the map is unknown.")
+            self.get_logger().info(f"Unknown Map Percentage (vs Known): {unknown_percentage_vs_known:.2f}%", throttle_duration_sec=1.0)
+        
+            if unknown_percentage_vs_known < 0.06:
+                self.get_logger().warn("Exploration Complete: Less than 0.06% of the map is unknown.")
                 # print exproation time
                 time_now = self.get_clock().now().nanoseconds*1e-9
                 time = (time_now - self.exploration_start_time - 18.0*60.0)/60.0    
                 self.get_logger().info(f"Total Exploration Time: {time:.2f} minutes")
                 self.get_logger().info(f"Total Frontier Goals Reached: {self.Frotier_Counter}")
                 self.state = 'MAP_EXPLORED'
+
+            elif self.Contrains_Relaxed == True and not self.FinalGoal_Origin_Set:
+                self.get_logger().info("All constraints relaxed and still no goal found. Setting origin as goal.", throttle_duration_sec=5.0)
+                origin_pose = PoseStamped()
+                origin_pose.header.frame_id = 'map'
+                origin_pose.pose.position.x = 0.0
+                origin_pose.pose.position.y = 0.0
+                origin_pose.pose.orientation.w = 1.0 # Default orientation
+                self.rejected_goals_grid = []
+                self.__goal_pose_cbk(origin_pose)
+                self.FinalGoal_Origin_Set = True
+                
             else:
-                self.get_logger().info("No valid frontier goal found. All candidates rejected or unreachable.")
-                self.get_logger().info("Relaxing frontier selection criteria for next iteration.")
-                self.rejected_goals_grid = [] # Clear rejected goals to allow re-evaluation
+                self.get_logger().info("No valid frontier goal found. All candidates rejected or unreachable.", throttle_duration_sec=5.0)
+                self.get_logger().info(f"Frontier Points Available: {frontier_points_count}", throttle_duration_sec=5.0)
+                self.get_logger().info("Relaxing frontier selection criteria for next iteration.", throttle_duration_sec=5.0)
                 self.min_frontier_distance = 0.0  # meters
                 self.min_free_neighbors_for_frontier = 0
+                self.search_radius_cells = 1
                 self.frontier_points = self._find_frontiers()
+                self.rejected_goals_grid = [] # Clear rejected goals to allow re-evaluation
                 self.state = 'IDLE'  # Retry goal selection in the next loop
-            
+                self.Contrains_Relaxed = True
+                            
     def _calculate_local_area_gain(self, i, j):
         """
         Calculates Information Gain by counting unknown (-1) cells within a 
@@ -1076,10 +1130,10 @@ class Task1(Node):
         
         return len(pathnames) # Returns float('inf') if no path is found
 
-    def _check_area_ahead_unknown(self, distance_m, width_m, required_percentage):
+    def _check_area_ahead_unknown(self, distance_m, width_m, required_percentage, wall_threshold_percentage):
         """
-        Checks the percentage of unknown cells (-1) within a rectangular window
-        in front of the robot.
+        Checks the percentage of unknown cells (-1) within a rectangular window 
+        in front of the robot. Returns False if the area is mostly a known wall.
         """
         if self.ttbot_pose is None or self.raw_map_data_array is None:
             return False # Cannot determine unknown status
@@ -1125,16 +1179,25 @@ class Task1(Node):
         max_j = min(W, max_j)
         
         if max_i <= min_i or max_j <= min_j:
-             return False 
-             
+            return False
+            
         window = raw_data[min_i:max_i, min_j:max_j]
         
         total_window_cells = window.size
-        unknown_cells = np.sum(window == -1)
         
         if total_window_cells == 0:
             return False
-
+        
+        # 1. Count Occupied cells (value 100)
+        occupied_cells = np.sum(window == 100)
+        occupied_percentage = (occupied_cells / total_window_cells) * 100.0
+        
+        if occupied_percentage >= wall_threshold_percentage:
+            self.get_logger().info(f"Ahead Occupied: {occupied_percentage:.1f}%. Detected wall, skipping unknown check.", throttle_duration_sec=1.0)
+            return False # Area is a known wall, no need for exploration
+                   
+        # 2. Count Unknown cells (value -1)
+        unknown_cells = np.sum(window == -1)
         unknown_percentage = (unknown_cells / total_window_cells) * 100.0
         
         self.get_logger().info(f"Ahead Unknown: {unknown_percentage:.1f}% ({unknown_cells} cells)", throttle_duration_sec=1.0)
