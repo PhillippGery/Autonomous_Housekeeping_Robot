@@ -304,7 +304,6 @@ class Task2(Node):
         
         return len(path.poses) - 1
 
-  
     def _is_path_clear(self, start_grid, end_grid):
         """!
         Checks if a straight line path between two grid points is clear of obstacles.

@@ -961,109 +961,110 @@ class Task1(Node):
         Selects the best goal from the frontier points list based on a combined
         heuristic (distance + information gain).
         """
-        if not frontier_points or self.ttbot_pose is None:
-            return
 
-        robot_x = self.ttbot_pose.pose.position.x
-        robot_y = self.ttbot_pose.pose.position.y
-        best_goal_pose = None
-        min_cost = float('inf')
-        
-        for i, j, count in frontier_points:
+        if frontier_points and  (self.ttbot_pose is not None):
 
-            grid_name = f"{i},{j}"
-
-            # Skip previously rejected goals
-            if grid_name in self.rejected_goals_grid:
-                continue
+            robot_x = self.ttbot_pose.pose.position.x
+            robot_y = self.ttbot_pose.pose.position.y
+            best_goal_pose = None
+            min_cost = float('inf')
             
-            # Check Reachability (A* Graph Node Exists)
-            
-            if grid_name not in self.map_processor.map_graph.g:
-                continue
+            for i, j, count in frontier_points:
 
-            # Calculate Costs
-            world_coords = self._grid_to_world((i, j))
-            goal_x, goal_y = world_coords[0], world_coords[1]
-            
-            distance = math.sqrt((goal_x - robot_x)**2 + (goal_y - robot_y)**2)
-            #distance = self._get_astar_distance(self.ttbot_pose, grid_name)
-            #self.get_logger().info(f"Frontier at ({i},{j}) - A* Distance: {distance:.2f} m, Info Gain Count: {count}")
+                grid_name = f"{i},{j}"
 
-            if distance < self.min_frontier_distance:
-                # Too close to current position, skip
-                self.rejected_goals_grid.append(grid_name)
-                continue
-
-            area_gain_cells = self._calculate_local_area_gain(i, j)
-            if area_gain_cells == 0:
-                 information_gain_term = float('inf') # Treat as highest cost if zero gain
-            else:
-                 # Information Gain Term (Total Cost is minimized)
-                 information_gain_term = self.Frontier_W_power / area_gain_cells
-
-            total_cost = (self.Frontier_W_dist * distance) + information_gain_term
-
-            # Select Best Goal
-            if total_cost < min_cost:
-                min_cost = total_cost
+                # Skip previously rejected goals
+                if grid_name in self.rejected_goals_grid:
+                    continue
                 
-                # Create PoseStamped object for the chosen goal
-                goal_pose = PoseStamped()
-                goal_pose.header.frame_id = 'map'
-                goal_pose.pose.position.x = goal_x
-                goal_pose.pose.position.y = goal_y
-                goal_pose.pose.orientation.w = 1.0 # Default orientation
-                best_goal_pose = goal_pose
+                # Check Reachability (A* Graph Node Exists)
+                
+                #if grid_name not in self.map_processor.map_graph.g:
+                    #continue
 
-        if best_goal_pose:
-            self.get_logger().info(f"Selected new frontier goal. Cost: {min_cost:.2f}")
-            self.__goal_pose_cbk(best_goal_pose)
-            self.FinalGoal_Origin_Set = False
+                # Calculate Costs
+                world_coords = self._grid_to_world((i, j))
+                goal_x, goal_y = world_coords[0], world_coords[1]
+                
+                distance = math.sqrt((goal_x - robot_x)**2 + (goal_y - robot_y)**2)
+                #distance = self._get_astar_distance(self.ttbot_pose, grid_name)
+                #self.get_logger().info(f"Frontier at ({i},{j}) - A* Distance: {distance:.2f} m, Info Gain Count: {count}")
+
+                if distance < self.min_frontier_distance:
+                    # Too close to current position, skip
+                    self.rejected_goals_grid.append(grid_name)
+                    continue
+
+                area_gain_cells = self._calculate_local_area_gain(i, j)
+                if area_gain_cells == 0:
+                    information_gain_term = float('inf') # Treat as highest cost if zero gain
+                else:
+                    # Information Gain Term (Total Cost is minimized)
+                    information_gain_term = self.Frontier_W_power / area_gain_cells
+
+                total_cost = (self.Frontier_W_dist * distance) + information_gain_term
+
+                # Select Best Goal
+                if total_cost < min_cost:
+                    min_cost = total_cost
+                    
+                    # Create PoseStamped object for the chosen goal
+                    goal_pose = PoseStamped()
+                    goal_pose.header.frame_id = 'map'
+                    goal_pose.pose.position.x = goal_x
+                    goal_pose.pose.position.y = goal_y
+                    goal_pose.pose.orientation.w = 1.0 # Default orientation
+                    best_goal_pose = goal_pose
+
+            if best_goal_pose:
+                self.get_logger().info(f"Selected new frontier goal. Cost: {min_cost:.2f}")
+                self.__goal_pose_cbk(best_goal_pose)
+                self.FinalGoal_Origin_Set = False
+                return
+                
             
+
+
+        #if less then 1% of the map is unknown consider exploration complete
+        # Calculate frontier Points in corelation to known map area
+        frontier_points_count = len(frontier_points)
+        
+        known_cells = np.sum((self.raw_map_data_array == 0) | (self.raw_map_data_array == 100))
+        unknown_percentage_vs_known = (frontier_points_count / known_cells) * 100.0        
+        
+        self.get_logger().info(f"Unknown Map Percentage (vs Known): {unknown_percentage_vs_known:.2f}%", throttle_duration_sec=1.0)
+    
+        if unknown_percentage_vs_known < 0.06:
+            self.get_logger().warn("Exploration Complete: Less than 0.06% of the map is unknown.")
+            # print exproation time
+            time_now = self.get_clock().now().nanoseconds*1e-9
+            time = (time_now - self.exploration_start_time - 18.0*60.0)/60.0    
+            self.get_logger().info(f"Total Exploration Time: {time:.2f} minutes")
+            self.get_logger().info(f"Total Frontier Goals Reached: {self.Frotier_Counter}")
+            self.state = 'MAP_EXPLORED'
+
+        elif self.Contrains_Relaxed == True and not self.FinalGoal_Origin_Set:
+            self.get_logger().info("All constraints relaxed and still no goal found. Setting origin as goal.", throttle_duration_sec=5.0)
+            origin_pose = PoseStamped()
+            origin_pose.header.frame_id = 'map'
+            origin_pose.pose.position.x = 0.0
+            origin_pose.pose.position.y = 0.0
+            origin_pose.pose.orientation.w = 1.0 # Default orientation
+            self.rejected_goals_grid = []
+            self.__goal_pose_cbk(origin_pose)
+            self.FinalGoal_Origin_Set = True
             
         else:
-
-            #if less then 1% of the map is unknown consider exploration complete
-            # Calculate frontier Points in corelation to known map area
-            frontier_points_count = len(frontier_points)
-            
-            known_cells = np.sum((self.raw_map_data_array == 0) | (self.raw_map_data_array == 100))
-            unknown_percentage_vs_known = (frontier_points_count / known_cells) * 100.0        
-            
-            self.get_logger().info(f"Unknown Map Percentage (vs Known): {unknown_percentage_vs_known:.2f}%", throttle_duration_sec=1.0)
-        
-            if unknown_percentage_vs_known < 0.06:
-                self.get_logger().warn("Exploration Complete: Less than 0.06% of the map is unknown.")
-                # print exproation time
-                time_now = self.get_clock().now().nanoseconds*1e-9
-                time = (time_now - self.exploration_start_time - 18.0*60.0)/60.0    
-                self.get_logger().info(f"Total Exploration Time: {time:.2f} minutes")
-                self.get_logger().info(f"Total Frontier Goals Reached: {self.Frotier_Counter}")
-                self.state = 'MAP_EXPLORED'
-
-            elif self.Contrains_Relaxed == True and not self.FinalGoal_Origin_Set:
-                self.get_logger().info("All constraints relaxed and still no goal found. Setting origin as goal.", throttle_duration_sec=5.0)
-                origin_pose = PoseStamped()
-                origin_pose.header.frame_id = 'map'
-                origin_pose.pose.position.x = 0.0
-                origin_pose.pose.position.y = 0.0
-                origin_pose.pose.orientation.w = 1.0 # Default orientation
-                self.rejected_goals_grid = []
-                self.__goal_pose_cbk(origin_pose)
-                self.FinalGoal_Origin_Set = True
-                
-            else:
-                self.get_logger().info("No valid frontier goal found. All candidates rejected or unreachable.", throttle_duration_sec=5.0)
-                self.get_logger().info(f"Frontier Points Available: {frontier_points_count}", throttle_duration_sec=5.0)
-                self.get_logger().info("Relaxing frontier selection criteria for next iteration.", throttle_duration_sec=5.0)
-                self.min_frontier_distance = 0.0  # meters
-                self.min_free_neighbors_for_frontier = 0
-                self.search_radius_cells = 1
-                self.frontier_points = self._find_frontiers()
-                self.rejected_goals_grid = [] # Clear rejected goals to allow re-evaluation
-                self.state = 'IDLE'  # Retry goal selection in the next loop
-                self.Contrains_Relaxed = True
+            self.get_logger().info("No valid frontier goal found. All candidates rejected or unreachable.", throttle_duration_sec=5.0)
+            self.get_logger().info(f"Frontier Points Available: {frontier_points_count}", throttle_duration_sec=5.0)
+            self.get_logger().info("Relaxing frontier selection criteria for next iteration.", throttle_duration_sec=5.0)
+            self.min_frontier_distance = 0.0  # meters
+            self.min_free_neighbors_for_frontier = 0
+            self.search_radius_cells = 1
+            self.frontier_points = self._find_frontiers()
+            self.rejected_goals_grid = [] # Clear rejected goals to allow re-evaluation
+            self.state = 'IDLE'  # Retry goal selection in the next loop
+            self.Contrains_Relaxed = True
                             
     def _calculate_local_area_gain(self, i, j):
         """
