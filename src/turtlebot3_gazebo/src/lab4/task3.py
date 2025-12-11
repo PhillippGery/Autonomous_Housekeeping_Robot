@@ -116,8 +116,8 @@ class Task3(Node):
 
         self.create_subscription(PoseStamped, '/move_base_simple/goal', self.__goal_pose_cbk, 10)
         self.create_subscription(PoseWithCovarianceStamped, '/amcl_pose', self.__ttbot_pose_cbk, 10)
-        self.create_subscription(Image, '/camera/image_raw', self.camera_callback, 10)
-        self.create_subscription(LaserScan, '/scan', self._check_for_obstacles, 10)
+        self.create_subscription(Image, '/camera/image_raw', self.camera_callback, 20)
+        self.create_subscription(LaserScan, '/scan', self._check_for_obstacles, 20)
      
 
         self.path_pub = self.create_publisher(Path, 'global_plan', 10)
@@ -324,7 +324,7 @@ class Task3(Node):
                 
         
         # Display vieo
-        scale = 0.7
+        scale = 0.4
 
         # Calculate the new dimensions
         width = int(cv_image.shape[1] * scale)
@@ -335,8 +335,8 @@ class Task3(Node):
         resized_image = cv2.resize(cv_image, dim, interpolation=cv2.INTER_AREA)
 
         # Display the RESIZED image
-        cv2.imshow("Object Detector", resized_image)
-        cv2.waitKey(1)
+        #cv2.imshow("Object Detector", resized_image)
+        #cv2.waitKey(1)
 
     def __goal_pose_cbk(self, data):
         """! Callback to catch the goal pose.
@@ -1306,6 +1306,7 @@ class AStar():
 class Map():
 
     def __init__(self, name):
+
         with open(name, 'r') as f:
             self.map_yaml = yaml.safe_load(f)
 
@@ -1319,7 +1320,8 @@ class Map():
         self.occupied_thresh = self.map_yaml['occupied_thresh']
         self.free_thresh = self.map_yaml['free_thresh']
         
-        map_image = Image.open(self.image_file_name)
+        
+        map_image = PILImage.open(self.image_file_name)
         raw_image_array = np.array(map_image)
         
         self.height = raw_image_array.shape[0]
