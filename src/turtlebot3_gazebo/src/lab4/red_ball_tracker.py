@@ -18,17 +18,8 @@ class ObjectDetector(Node):
         super().__init__('red_ball_tracker')
         
         # raw image topic
-        self.subscription = self.create_subscription( Image, '/camera/image_raw', self.listener_callback, 10)
-        self.scan_subscription = self.create_subscription(LaserScan, '/scan', self.scan_callback, 10)
-        #self.bumper_subscription = self.create_subscription(ContactsState, '/bumper_collisions', self.bumper_callback,10)
-
-        # Does not work because depth image is not avalivle in lab config
-        # self.subscription = message_filters.Subscriber(self, Image, '/camera/color/image_raw')
-        # self.depth_sub = message_filters.Subscriber(self, Image, '/camera/depth/image_rect_raw')
-        # self.ts = message_filters.ApproximateTimeSynchronizer([self.subscription], 10, 0.1)      
-        # # synchronized callback with two msges
-        # self.ts.registerCallback(self.listener_callback)
-        
+        self.subscription = self.create_subscription( Image, '/camera/image_raw', self.camera_callback, 10)
+        self.scan_subscription = self.create_subscription(LaserScan, '/scan', self.scan_callback, 10)        
         # Publish bounding box data
         self.bbox_publisher = self.create_publisher(BoundingBox2D, '/bbox', 10)
         self.publisher_ = self.create_publisher(Twist, '/cmd_vel', 10)
@@ -50,28 +41,18 @@ class ObjectDetector(Node):
         self.bumper_hit = False
 
         #Controller Ball follower Init prms
-        self.pid_p_angular = 0.4
-        self.pid_i_angular = 0.1
-        self.pid_d_angular = 0.4
-        self.p_linear = 0.3
-
-        # self.p_linear = 0.8608         # Proportional gain for linear speed
-        # self.pid_p_angular = 2.0747    # Proportional gain for angular velocity
-        # self.pid_i_angular = 0.1692    # Integral gain for angular velocity
-        # self.pid_d_angular = -0.02   # Derivative gain for angular velocity
-
-        self.integral_angular = 0.0
-        self.previous_error_angular = 0.0
-        
-        # desired ball size in pixels
-        self.des_ball_size = 150
+        self.BF_pid_p_angular = 0.4
+        self.BF_pid_i_angular = 0.1
+        self.BF_pid_d_angular = 0.4
+        self.BF_p_linear = 0.3
+        self.BF_integral_angular = 0.0
+        self.BF_previous_error_angular = 0.0       
+        self.BF_des_ball_size = 150 # desired ball size in pixels
 
         # Camera parameters
         self.camera_hfov_degrees = 60.0
-
-        self.max_linear_speed = 0.2
-        self.max_angular_speed = 1.0
-
+        self.BF_max_linear_speed = 0.2
+        self.BF_max_angular_speed = 1.0
         self.last_time = None
         self.last_detection_time = self.get_clock().now()
 
@@ -84,7 +65,7 @@ class ObjectDetector(Node):
 
         self.get_logger().info("Red Ball follower  started.")
 
-    def listener_callback(self, msg):
+    def camera_callback(self, msg):
 
         if self.bumper_hit:
             return
@@ -109,13 +90,13 @@ class ObjectDetector(Node):
         
         hsv_image = cv2.cvtColor(cv_image, cv2.COLOR_BGR2HSV)
         
-        lower_red = np.array([0, 130, 100])
-        upper_red = np.array([10, 255, 255])
-        mask1 = cv2.inRange(hsv_image, lower_red, upper_red)
+        self.lower_red_1 = np.array([0, 130, 100])
+        self.upper_red_1 = np.array([10, 255, 255])
+        mask1 = cv2.inRange(hsv_image, self.lower_red_1, self.upper_red_1)
 
-        lower_red = np.array([170, 130, 100])
-        upper_red = np.array([180, 255, 255])
-        mask2 = cv2.inRange(hsv_image, lower_red, upper_red)
+        self.lower_red_2 = np.array([170, 130, 100])
+        self.upper_red_2 = np.array([180, 255, 255])
+        mask2 = cv2.inRange(hsv_image, self.lower_red_2, self.upper_red_2)
 
         # Combine the two masks
         mask = cv2.bitwise_or(mask1, mask2)
@@ -178,7 +159,7 @@ class ObjectDetector(Node):
             #distance_to_object = depth_image[int(y), int(x)]
             #self.get_logger().info(f"Distance to Object: {distance_to_object} meters")
 
-            distance_to_object = (self.des_ball_size)/w
+            distance_to_object = (self.BF_des_ball_size)/w
             error_distance = distance_to_object - 1.0  # desired distance is 1.0 meter
             self.get_logger().info(f"Distance: {distance_to_object}")
 
@@ -214,32 +195,32 @@ class ObjectDetector(Node):
 
             #Controller
             #error_x = heading_error_degrees
-            self.integral_angular += error_x
-            derivative_angular = error_x - self.previous_error_angular
+            self.BF_integral_angular += error_x
+            derivative_angular = error_x - self.BF_previous_error_angular
 
-            p_term = self.pid_p_angular * error_x
-            i_term = (self.pid_i_angular * self.integral_angular)*dt
-            d_term = (self.pid_d_angular * derivative_angular)/dt
+            p_term = self.BF_pid_p_angular * error_x
+            i_term = (self.BF_pid_i_angular * self.BF_integral_angular)*dt
+            d_term = (self.BF_pid_d_angular * derivative_angular)/dt
 
             #windup for integral term
             i_term = np.clip(i_term, -0.5, 0.5)
 
             if abs(error_distance) > 0.1:
-                linear_velocity = self.p_linear * error_distance
+                linear_velocity = self.BF_p_linear * error_distance
             else:
                 linear_velocity = 0.0
             
             if abs(error_x) < 0.05:
                 angular_velocity = 0.0
-                self.previous_error_angular = 0.0
-                self.integral_angular = 0.0
+                self.BF_previous_error_angular = 0.0
+                self.BF_integral_angular = 0.0
                 self.get_logger().info("Object centered.")
             else:
                 angular_velocity = p_term + i_term + d_term
-                self.previous_error_angular = error_x
+                self.BF_previous_error_angular = error_x
 
-            twist_msg.linear.x = np.clip(linear_velocity, -self.max_linear_speed, self.max_linear_speed)
-            twist_msg.angular.z = np.clip(-angular_velocity, -self.max_angular_speed, self.max_angular_speed)
+            twist_msg.linear.x = np.clip(linear_velocity, -self.BF_max_linear_speed, self.BF_max_linear_speed)
+            twist_msg.angular.z = np.clip(-angular_velocity, -self.BF_max_angular_speed, self.BF_max_angular_speed)
             
             self.publisher_.publish(twist_msg)
 
@@ -254,15 +235,15 @@ class ObjectDetector(Node):
                 twist_msg.linear.x = 0.0
                 twist_msg.angular.z = 0.3
                 self.publisher_.publish(twist_msg)
-                self.previous_error_angular = 0.0
-                self.integral_angular = 0.0
+                self.BF_previous_error_angular = 0.0
+                self.BF_integral_angular = 0.0
                 self.wall_follower.reset_pid()
                 self.state = "TRACKING"
 
             elif time_since_last_detection > 13.0:
                 self.get_logger().info("Exploring with Wallfolower..." )
-                self.previous_error_angular = 0.0
-                self.integral_angular = 0.0
+                self.BF_previous_error_angular = 0.0
+                self.BF_integral_angular = 0.0
                 # call Wallfollower
                 self.state = "SEARCHING"
                 
@@ -271,8 +252,8 @@ class ObjectDetector(Node):
                 twist_msg.linear.x = 0.0
                 twist_msg.angular.z = 0.0
                 self.publisher_.publish(twist_msg)
-                self.previous_error_angular = 0.0
-                self.integral_angular = 0.0
+                self.BF_previous_error_angular = 0.0
+                self.BF_integral_angular = 0.0
                 self.wall_follower.reset_pid()
                 self.state = "DEFAULT"
 
@@ -394,8 +375,8 @@ class ObjectDetector(Node):
 
     def reset_all_controllers(self):
         # Reset ball PID
-        self.integral_angular = 0.0
-        self.previous_error_angular = 0.0
+        self.BF_integral_angular = 0.0
+        self.BF_previous_error_angular = 0.0
         self.last_time_ball = None
         self.wall_follower.reset_pid()
 
