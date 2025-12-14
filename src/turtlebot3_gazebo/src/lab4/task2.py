@@ -264,6 +264,12 @@ class Task2(Node):
         else:
             self.get_logger().warn("A* failed to find a path.")
             self.move_ttbot(0.0, 0.0)
+            self.map_processor = MapProcessor(self.map_yaml_path)
+            inflation_kernel = self.map_processor.rect_kernel(self.inflation_kernel_size, 1)
+            self.map_processor.inflate_map(inflation_kernel)                
+            self.map_processor.get_graph_from_map()
+            self._publish_inflated_map()
+            self.get_logger().info("Reset the map.")
 
         self.astarTime = Float32()
         self.astarTime.data = float(self.get_clock().now().nanoseconds*1e-9-self.start_time)
@@ -526,11 +532,11 @@ class Task2(Node):
                 self.goal_pose = None
                 self.last_commanded_speed = 0.0
                 self.state = 'IDLE'
-                self.map_processor = MapProcessor(self.map_yaml_path)
-                inflation_kernel = self.map_processor.rect_kernel(self.inflation_kernel_size, 1)
-                self.map_processor.inflate_map(inflation_kernel)                
-                self.map_processor.get_graph_from_map()
-                self._publish_inflated_map()
+                # self.map_processor = MapProcessor(self.map_yaml_path)
+                # inflation_kernel = self.map_processor.rect_kernel(self.inflation_kernel_size, 1)
+                # self.map_processor.inflate_map(inflation_kernel)                
+                # self.map_processor.get_graph_from_map()
+                # self._publish_inflated_map()
                 return
             else:
                 # ALIGNING: Position is correct, so stop moving and only rotate.
@@ -799,6 +805,19 @@ class Task2(Node):
 
         cluster_ranges = ranges[idx_start:idx_end + 1]
         obs_dist = np.nanmean(cluster_ranges)
+
+        if obs_dist >= 1.0:
+            self.get_logger().warn(f"Obstacle at {obs_dist:.2f} m is too far for reliable estimation")
+            self.move_ttbot(0.0, 0.0)
+            if self.goal_pose is not None:
+            #self.path = self.a_star_path_planner(self.ttbot_pose, self.goal_pose)
+                self.__goal_pose_cbk(self.goal_pose)
+                if self.path.poses:
+                    self.get_logger().info("Replanning successful. Resuming path following.")
+                    self.path_pub.publish(self.path)
+                    self.current_path_idx = 0
+                    self.obstacle_state = 'CLEAR'
+
 
         self.estimated_diameter = self.estimate_obstacle_diameter(angular_width_rad, obs_dist)
         self.estimated_diameter = min(self.estimated_diameter, self.max_obstacle_diameter)

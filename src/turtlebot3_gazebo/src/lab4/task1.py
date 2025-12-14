@@ -111,7 +111,7 @@ class Task1(Node):
         self.lookahead_ratio = 0.5     # How much the lookahead increases with speed
 
         # Speed and tolerance settings
-        self.speed_max = 0.46
+        self.speed_max = 0.31
         self.rotspeed_max = 1.9
         self.goal_tolerance = 0.1
         self.align_threshold = 0.5
