@@ -12,7 +12,7 @@ from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Pose, Twis
 from std_msgs.msg import Float32
 from ament_index_python.packages import get_package_share_directory
 
-from .AStar import Queue, Node, Tree, AStar, MapProcessor, Map
+from ..src.lab4.AStar import Queue, Node, Tree, AStar, MapProcessor, Map
 
 
 class Navigation(RosNode):
