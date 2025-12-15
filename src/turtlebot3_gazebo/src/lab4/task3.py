@@ -81,9 +81,9 @@ class Task3(Node):
         self.BF_p_linear = 0.3
         self.BF_integral_angular = 0.0
         self.BF_previous_error_angular = 0.0       
-        self.BF_circularity_threshold = 0.8
+        self.BF_circularity_threshold = 0.75
         self.min_Ball_area = 80**2 # pixels
-        self.Ball_area_Th = 500**2 # pixels
+        self.Ball_area_Th = 400**2 # pixels
         self.Ball_diameter = 0.3
         self.Flg_apprach_Ball = False
         self.Target_Distance_Ball = 1.5 # The desired distance the robot should stop from the ball
@@ -92,6 +92,7 @@ class Task3(Node):
         self.GREEN_BALL_Pos = None
         self.BLUE_BALL_Pos = None
         self.delay_timer = None
+        self.Reset_Flg_apprach_Ball_timer = None
 
         # Camera parameters
         self.camera_hfov_degrees = 60.0
@@ -101,16 +102,21 @@ class Task3(Node):
         self.last_detection_time = self.get_clock().now()
 
         # Color parameters
-        self.lower_red_1 = np.array([0, 140, 100])
+        self.lower_red_1 = np.array([0, 190, 70])
         self.upper_red_1 = np.array([10, 255, 255])
-        self.lower_red_2 = np.array([170, 140, 100])
+        self.lower_red_2 = np.array([170, 190, 70])
         self.upper_red_2 = np.array([180, 255, 255])
 
-        self.lower_blue = np.array([105, 80, 30])
+        self.lower_blue = np.array([100, 130, 30])
         self.upper_blue = np.array([135, 255, 255])
 
-        self.lower_green = np.array([35, 80, 80])  
+        self.lower_green = np.array([35, 130, 55])  
         self.upper_green = np.array([80, 255, 255])
+
+
+        self.BF_circularity_threshold = 0.8
+        self.min_Ball_area = 50**2 # pixels
+        self.Ball_area_Th = 300**2 # pixels
 
         self.mission_waypoints = {
             # 'WP_NAME': (x [m], y [m], yaw [rad])
@@ -134,7 +140,7 @@ class Task3(Node):
         # Speed and tolerance settings
         self.speed_max = 0.31
         self.rotspeed_max = 1.9
-        self.goal_tolerance = 0.1
+        self.goal_tolerance = 0.2
         self.align_threshold = 0.4 #
         self.last_commanded_speed = 0.0
         self.use_dynamic_lookahead = True # Enable dynamic lookahead based on speed
@@ -160,6 +166,9 @@ class Task3(Node):
         self.calc_time_pub = self.create_publisher(Float32, 'astar_time',10)
         self.inflated_map_pub = self.create_publisher(OccupancyGrid, '/custom_costmap', 1)
         self.bbox_publisher = self.create_publisher(BoundingBox2D, '/bbox', 10)
+        self.red_pos_pub = self.create_publisher(Pose, '/red_pos', 10)
+        self.blue_pos_pub = self.create_publisher(Pose, '/blue_pos', 10)
+        self.green_pos_pub = self.create_publisher(Pose, '/green_pos', 10)
 
         #set inatl pose automaticly 
         self.initial_pose_pub = self.create_publisher(PoseWithCovarianceStamped, '/initialpose', 10)
@@ -231,6 +240,11 @@ class Task3(Node):
                 area = cv2.contourArea(contour)
                 perimeter = cv2.arcLength(contour, True)
                 x, y, w, h = cv2.boundingRect(contour)
+                centroid_y = y + h // 2
+
+                # Check if centroid is in the lower 60% of the image
+                #if centroid_y > cv_image.shape[0] * 0.4:
+                   # continue
                 
                 # Avoid division by zero
                 if perimeter == 0:
@@ -246,14 +260,15 @@ class Task3(Node):
                 if circularity > self.BF_circularity_threshold and area > self.min_Ball_area:
                     potential_balls.append(contour)
                 
-                if circularity > self.BF_circularity_threshold*0.8 and area > self.min_Ball_area*2:
+                elif circularity > self.BF_circularity_threshold*0.8 and area > self.Ball_area_Th:
                     potential_balls.append(contour)
 
                 # elif area > self.min_Ball_area and area < self.Ball_area_Th and recangularity < 0.3:
                 #     potential_balls.append(contour)
 
-                elif area > self.Ball_area_Th and recangularity < 0.4:
-                    potential_balls.append(contour)
+                # elif area > self.Ball_area_Th and recangularity < 0.4:
+                #     potential_balls.append(contour)
+                
             
         if potential_balls and not self.Flg_apprach_Ball:
 
@@ -319,13 +334,13 @@ class Task3(Node):
             # else:
             #     linear_velocity = 0.0
             
-            if abs(error_x) < 0.05:
+            if abs(self.Ball_heading_error_degrees) < 0.8:
                 angular_velocity = 0.0
 
                 if self.delay_timer is None:
                     self.delay_timer = self.get_clock().now().nanoseconds*1e-9
 
-                if (self.get_clock().now().nanoseconds*1e-9 - self.delay_timer) > 1.0:
+                if (self.get_clock().now().nanoseconds*1e-9 - self.delay_timer) > 0.5:
                     self.get_logger().info("Object centered.", throttle_duration_sec=5),
                     self.BF_previous_error_angular = 0.0
                     self.BF_integral_angular = 0.0
@@ -337,6 +352,7 @@ class Task3(Node):
             else:
                 angular_velocity = p_term + i_term + d_term
                 self.BF_previous_error_angular = error_x
+                self.delay_timer = None
 
 
             self.move_ttbot(0.0, -angular_velocity)
@@ -1186,7 +1202,14 @@ class Task3(Node):
         if distance_NOTvalid:
             self.get_logger().warn(f"Distance discrepancy too high: Camera={self.Camera_distance_to_object:.2f}, Lidar={ball_distance:.2f}", throttle_duration_sec=3)
             self.Flg_apprach_Ball = True
+            if self.Reset_Flg_apprach_Ball_timer is not None and self.Reset_Flg_apprach_Ball_timer.is_valid():
+                self.Reset_Flg_apprach_Ball_timer.cancel()
+            self.Reset_Flg_apprach_Ball_timer = self.create_timer(3.0, self.Reset_Flg_apprach_Ball)
             return
+        
+  
+        
+
 
         #angle_from_robot_centerline = raw_angle
     
@@ -1237,17 +1260,27 @@ class Task3(Node):
             self.map_processor.get_graph_from_map()            
             self.get_logger().info("Graph updated with Ball.")
 
+            ball_pose_msg = Pose()
+            ball_pose_msg.position.x = Ball_world_x
+            ball_pose_msg.position.y = Ball_world_y
+            ball_pose_msg.position.z = 0.0
+            ball_pose_msg.orientation.w = 1.0
+            
+
             if self.detected_color == 'RED':
                 self.get_logger().info("RED BALL FOUND", throttle_duration_sec=5)
                 self.RED_BALL_Pos = self.Ball_pos_world
+                self.red_pos_pub.publish(ball_pose_msg)
 
             elif self.detected_color == 'GREEN':
                 self.get_logger().info("GREEN BALL FOUND", throttle_duration_sec=5)
                 self.GREEN_BALL_Pos = self.Ball_pos_world
+                self.green_pos_pub.publish(ball_pose_msg)
 
             elif self.detected_color == 'BLUE': 
                 self.get_logger().info("BLUE BALL FOUND", throttle_duration_sec=5)
                 self.BLUE_BALL_Pos = self.Ball_pos_world
+                self.blue_pos_pub.publish(ball_pose_msg)
 
             else:
                 self.get_logger().info("error in color detection", throttle_duration_sec=5)
@@ -1405,7 +1438,13 @@ class Task3(Node):
                 best_color = color
                 
         return best_color
-    
+
+    def Reset_Flg_apprach_Ball(self):
+        self.Flg_apprach_Ball = False
+        if self.Reset_Flg_apprach_Ball_timer is not None:
+            self.destroy_timer(self.Reset_Flg_apprach_Ball_timer)
+            self.Reset_Flg_apprach_Ball_timer = None  
+
 class Queue():
     def __init__(self, init_queue = []):
         self.queue = copy(init_queue)

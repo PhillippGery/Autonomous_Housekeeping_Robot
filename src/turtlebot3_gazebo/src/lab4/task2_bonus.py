@@ -7,13 +7,14 @@ import numpy as np
 
 import rclpy
 from rclpy.node import Node
-from nav_msgs.msg import Path
+from nav_msgs.msg import Path, OccupancyGrid
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Pose, Twist
 from sensor_msgs.msg import Image, LaserScan
 from vision_msgs.msg import BoundingBox2D
 from cv_bridge import CvBridge
 from std_msgs.msg import Float32
 from ament_index_python.packages import get_package_share_directory
+import random
 
 from PIL import Image
 import yaml
@@ -24,7 +25,6 @@ import time
 from queue import PriorityQueue
 
 # Import other python packages that you think necessary
-
 
 class Task2(Node):
     """
@@ -37,23 +37,31 @@ class Task2(Node):
         self.goal_pose = None
         self.ttbot_pose = None
         self.start_time = 0.0
-        self.get_logger().info("Graph built successfully.")
 
         self.state = 'IDLE'  # Possible states: IDLE, ASTARPATH_FOLLOWING, OBSTACLE_AVOIDANCE
 
 
         pkg_share_path = get_package_share_directory('turtlebot3_gazebo')
-        default_map_path = os.path.join(pkg_share_path, 'maps', 'sync_classroom_map.yaml')
+        default_map_path = os.path.join(pkg_share_path, 'maps', 'Map.yaml')
 
         # 2. Declare the 'map_yaml_path' parameter with the default value
         self.declare_parameter('map_yaml_path', default_map_path)
 
         # 3. Get the value of the parameter from the launch file (or use the default)
-        map_yaml_path = self.get_parameter('map_yaml_path').get_parameter_value().string_value
+        self.map_yaml_path = self.get_parameter('map_yaml_path').get_parameter_value().string_value
 
-        self.min_front_obstacle_distance = 0.4  # Meters
+        #Obstacle avoidance variables
+        self.obstacle_state = 'CLEAR'
+        self.min_front_obstacle_distance = 0.35  # Meters
+        self.min_back_obstacle_distance = 0.25   # Meters
+        self.safety_distance = 0.2  
+        self.obstacle_inflation_radius_m = 0.4
+        self.retreat_distance = -0.20      # Distance to retreat in meters 
+        self.current_retreat_distance = 0.0 # Tracker for retreat distance 
+        self.retreat_speed = -0.15          # Reverse linear speed (m/s)
+        self.max_obstacle_diameter = 0.4    # Maximum diameter of obstacles to consider (meters)
       
-        inflation_kernel_size = 9
+        self.inflation_kernel_size = 10
         self.max_dist_alternate_Ponit = 1.0  # if start or stop pose is not valid, search for alternate point within this distance (meters)
         self.max_angle_alpha_to_startdrive = 1.0  # radian (57 degrees)
         
@@ -72,20 +80,22 @@ class Task2(Node):
         # Speed and tolerance settings
         self.speed_max = 0.31
         self.rotspeed_max = 1.9
-        self.goal_tolerance = 0.2
-        self.align_threshold = 0.4
+        self.goal_tolerance = 0.1
+        self.align_threshold = 0.4 #
 
         self.last_commanded_speed = 0.0
         self.use_dynamic_lookahead = True # Enable dynamic lookahead based on speed
         self.use_line_of_sight_check = True # Enable line-of-sight shortcut checking
         self.shortcut_active = False #if a shortcut is being taken true
 
-        self.get_logger().info(f"Loading map from '{map_yaml_path}' and building graph...")
-        self.map_processor = MapProcessor(map_yaml_path)
-        inflation_kernel = self.map_processor.rect_kernel(inflation_kernel_size, 1)
+        self.get_logger().info(f"Loading map from '{self.map_yaml_path}' and building graph...")
+        self.map_processor = MapProcessor(self.map_yaml_path)
+        inflation_kernel = self.map_processor.rect_kernel(self.inflation_kernel_size, 1)
         self.map_processor.inflate_map(inflation_kernel)
+        
         self.map_processor.get_graph_from_map()
         self.get_logger().info("Graph built successfully.")
+        self.rrt_planner = RRTStarGrid(self.map_processor, node_instance=self)
 
         self.create_subscription(PoseStamped, '/move_base_simple/goal', self.__goal_pose_cbk, 10)
         self.create_subscription(PoseWithCovarianceStamped, '/amcl_pose', self.__ttbot_pose_cbk, 10)
@@ -95,6 +105,7 @@ class Task2(Node):
         self.path_pub = self.create_publisher(Path, 'global_plan', 10)
         self.cmd_vel_pub = self.create_publisher(Twist, 'cmd_vel', 10)
         self.calc_time_pub = self.create_publisher(Float32, 'astar_time',10)
+        self.inflated_map_pub = self.create_publisher(OccupancyGrid, '/custom_costmap', 1)
         #self.bbox_publisher = self.create_publisher(BoundingBox2D, '/bbox', 10)
 
         #set inatl pose automaticly 
@@ -107,6 +118,8 @@ class Task2(Node):
         self.rate = 10.0
         self.timer = self.create_timer(1.0 / self.rate, self.run_loop)
 
+        self._publish_inflated_map()
+
     def __goal_pose_cbk(self, data):
         """! Callback to catch the goal pose.
         @param  data    PoseStamped object from RVIZ.
@@ -114,6 +127,8 @@ class Task2(Node):
         """
                   
         self.goal_pose = data
+            
+
         self.get_logger().info(
             'New goal received: {:.4f}, {:.4f}'.format(self.goal_pose.pose.position.x, self.goal_pose.pose.position.y))
         
@@ -132,6 +147,9 @@ class Task2(Node):
         else:
             self.get_logger().warn("A* failed to find a path to the goal.")
             self.move_ttbot(0.0, 0.0)
+        
+        if self.state == 'RRT*PATH_FOLLOWING':
+            self.goal_pose = self.final_goal_pose
 
     def __ttbot_pose_cbk(self, data):
         """! Callback to catch the position of the vehicle.
@@ -142,7 +160,6 @@ class Task2(Node):
         pose_stamped.header = data.header
         pose_stamped.pose = data.pose.pose
         self.ttbot_pose = pose_stamped
-       
 
     def a_star_path_planner(self, start_pose, end_pose):
         """! A Start path planner. """
@@ -233,13 +250,26 @@ class Task2(Node):
             node_grid = tuple(map(int, name.split(',')))
             astar_solver.h[name] = math.sqrt((end_grid[0] - node_grid[0])**2 + (end_grid[1] - node_grid[1])**2)
         
-        path_names, path_dist = astar_solver.solve(start_node, end_node)
+        #path_names, path_dist = astar_solver.solve(start_node, end_node)
+        if self.state == 'RRT*PATH_FOLLOWING':
+            path_names, path_dist = self.rrt_planner.solve(start_grid, end_grid)
+        else:
+            path_names, path_dist = astar_solver.solve(start_node, end_node)
         
+
+
         path.header.stamp = self.get_clock().now().to_msg()
         path.header.frame_id = 'map'
         if path_names:
             self.get_logger().info(f"A* found a path of length {len(path_names)}")
-            self.state = 'ASTARPATH_FOLLOWING'
+            
+            if self.state == 'RRT*PATH_FOLLOWING':
+                self.get_logger().info("RRT* Path Following Activated")
+                path = self.rrt_planner.path_to_pose_stamped(path_names, path_dist)
+            else:
+                self.state = 'ASTARPATH_FOLLOWING'
+
+            
             for name in path_names:
                 grid_coords = tuple(map(int, name.split(',')))
                 world_coords = self._grid_to_world(grid_coords)
@@ -253,11 +283,17 @@ class Task2(Node):
         else:
             self.get_logger().warn("A* failed to find a path.")
             self.move_ttbot(0.0, 0.0)
+            self.map_processor = MapProcessor(self.map_yaml_path)
+            inflation_kernel = self.map_processor.rect_kernel(self.inflation_kernel_size, 1)
+            self.map_processor.inflate_map(inflation_kernel)                
+            self.map_processor.get_graph_from_map()
+            self._publish_inflated_map()
+            self.get_logger().info("Reset the map.")
 
-        self.astarTime = Float32()
-        self.astarTime.data = float(self.get_clock().now().nanoseconds*1e-9-self.start_time)
-        self.calc_time_pub.publish(self.astarTime)
-        self.get_logger().info(f"A* planning time: {self.astarTime.data:.4f} seconds")
+        # self.astarTime = Float32()
+        # self.astarTime.data = float(self.get_clock().now().nanoseconds*1e-9-self.start_time)
+        # self.calc_time_pub.publish(self.astarTime)
+        # self.get_logger().info(f"A* planning time: {self.astarTime.data:.4f} seconds")
         
         return path
 
@@ -268,22 +304,22 @@ class Task2(Node):
         @return idx                   Position in the path pointing to the next goal pose to follow.
         """
         min_dist = float('inf')
-        closest_idx = 0
+        self.closest_idx = 0
         for i, pose in enumerate(path.poses):
             dx = pose.pose.position.x - vehicle_pose.pose.position.x
             dy = pose.pose.position.y - vehicle_pose.pose.position.y
             dist = math.sqrt(dx**2 + dy**2)
             if dist < min_dist:
                 min_dist = dist
-                closest_idx = i
+                self.closest_idx = i
 
         if self.use_dynamic_lookahead:
             lookahead_dist = self.last_commanded_speed * self.lookahead_ratio + self.min_lookahead_dist
         else:
             lookahead_dist = self.min_lookahead_dist # Fallback to a minimum value if disabled
 
-        lookahead_idx = closest_idx
-        for i in range(closest_idx, len(path.poses)):
+        lookahead_idx = self.closest_idx
+        for i in range(self.closest_idx, len(path.poses)):
             dx = path.poses[i].pose.position.x - vehicle_pose.pose.position.x
             dy = path.poses[i].pose.position.y - vehicle_pose.pose.position.y
             dist = math.sqrt(dx**2 + dy**2)
@@ -293,7 +329,6 @@ class Task2(Node):
         
         return len(path.poses) - 1
 
-  
     def _is_path_clear(self, start_grid, end_grid):
         """!
         Checks if a straight line path between two grid points is clear of obstacles.
@@ -366,14 +401,6 @@ class Task2(Node):
             alpha += 2 * math.pi
         
         beta = -robot_theta - alpha
-
-        # If we are very close to the goal, stop the robot to prevent overshoot.
-        if rho < 0.05: # 5 cm tolerance
-            return 0.0, 0.0
-
-        # 5. Apply the Control Law 
-        # v = k_rho * rho
-        # omega = k_alpha * alpha + k_beta * beta
         
         p_term = self.kp_angular * alpha
         
@@ -419,29 +446,66 @@ class Task2(Node):
     def run_loop(self):
         """! Main loop of the node, called by a timer. """
 
+
+        self.get_logger().info(f"Current State: {self.state}", throttle_duration_sec=4.0)
+
         if self.ttbot_pose is None or self.goal_pose is None or not self.path.poses:
+            return       
+        
+
+        if self.state == 'IDLE':
+            self.move_ttbot(0.0, 0.0)
             return
+            
+        
+        elif self.obstacle_state == 'RETREATING':
+            # Calculate distance moved in this cycle (dt)
+            dt = 1.0 / self.rate
+            distance_moved = abs(self.retreat_speed * dt)
+            
+            # Check if we have met the retreat distance goal
+            if self.current_retreat_distance < abs(self.retreat_distance):
+                # Haven't moved far enough back yet.
+                self.move_ttbot(self.retreat_speed, 0.0) # Move backward (speed is negative)
+                self.current_retreat_distance += distance_moved
+                if self.obstacle_behind:
+                    self.obstacle_state = 'CLEAR'
+                    self.state = 'ASTARPATH_FOLLOWING'
+                    self.get_logger().warn("Obstacle still behind during retreat", throttle_duration_sec=1.0)
+                return # Skip path following
+            else:
+                # Retreat distance met. Stop and transition to REPLANNING.
+                self.move_ttbot(0.0, 0.0) # Ensure robot is stopped
+                self.get_logger().info("Retreat complete. Transitioning to REPLANNING.")                
+                self.obstacle_state = 'ALIGNING_TO_OBS'            
+                # After setting the state, the next cycle of _check_for_obstacles will call replan_with_obstacle.
+                return
+        elif self.obstacle_state == 'ALIGNING_TO_OBS':
+            self.recalculate_obstacle_position()
 
-        #self.get_logger().info(f"Loop running in state: {self.state}")
+        elif (self.state == 'ASTARPATH_FOLLOWING' or self.state == 'RRT*PATH_FOLLOWING') and self.obstacle_state == 'CLEAR':
+            final_goal_pose = self.path.poses[-1]                           
+            # Get the current goal from the path, possibly using line-of-sight optimization
+            self.Path_optimizaton( final_goal_pose)
+        
+            # Calculate and publish robot commands
+            speed, heading = self.path_follower(self.ttbot_pose, self.current_goal)
+            self.move_ttbot(speed, heading)
+            self.last_commanded_speed = speed
+
+
+            # Check if we have reached the final goal position and orientation
+            self.Check_alingment_Goal( final_goal_pose) 
         
 
-        if self.state == 'OBSTACLE_AVOIDANCE':
-            # Currently avoiding an obstacle, skip path following
+        elif self.obstacle_state == 'REPLANNING':
+            
+            self.replan_with_obstacle()
+            self.move_ttbot(0.0, 0.0)
             return
         
         
-        final_goal_pose = self.path.poses[-1]                           
-        # Get the current goal from the path, possibly using line-of-sight optimization
-        self.Path_optimizaton( final_goal_pose)
-      
-        # Calculate and publish robot commands
-        speed, heading = self.path_follower(self.ttbot_pose, self.current_goal)
-        self.move_ttbot(speed, heading)
-        self.last_commanded_speed = speed
-
-
-        # Check if we have reached the final goal position and orientation
-        self.Check_alingment_Goal( final_goal_pose) 
+        
 
         
 
@@ -483,9 +547,20 @@ class Task2(Node):
                 # GOAL REACHED: Position and orientation are correct. Stop everything.
                 self.get_logger().info("Goal reached and Alinged to Goal Pose!")
                 self.move_ttbot(0.0, 0.0)
-                self.path = Path()
-                self.goal_pose = None
-                self.last_commanded_speed = 0.0
+                if self.state == 'RRT*PATH_FOLLOWING':
+                    self.state = 'ASTARPATH_FOLLOWING'
+                    self.__goal_pose_cbk(self.final_goal_pose)
+                else:
+                    self.state = 'IDLE'
+                    self.path = Path()
+                    self.goal_pose = None
+                    self.last_commanded_speed = 0.0
+                
+                # self.map_processor = MapProcessor(self.map_yaml_path)
+                # inflation_kernel = self.map_processor.rect_kernel(self.inflation_kernel_size, 1)
+                # self.map_processor.inflate_map(inflation_kernel)                
+                # self.map_processor.get_graph_from_map()
+                # self._publish_inflated_map()
                 return
             else:
                 # ALIGNING: Position is correct, so stop moving and only rotate.
@@ -564,29 +639,123 @@ class Task2(Node):
         called from scan subscription
         indipendent from run_loop and path following
         """
-        #self.get_logger().info("Checking for obstacles...")
+        if self.ttbot_pose is None or self.goal_pose is None:
+            return
+        
+        self.scan_msg = scan_msg
         
         # Process laser scan data
         ranges = np.array(scan_msg.ranges)
         ranges[np.isinf(ranges)] = np.nan
         ranges[ranges == 0.0] = np.nan
-        
-        #front slice is 20 degrees to left and right
-        front_slice = np.concatenate((ranges[0:20], ranges[340:360]))
+        self.front_slice = np.concatenate((ranges[0:28], ranges[332:360]))
+
+        back_slice = ranges[160:220]
+        safety_slice = np.concatenate((ranges[0:90], ranges[270:360]))
         
         try:
-            front_dist = np.nanmin(front_slice)
-            #self.get_logger().info(f"Minimum front distance: {front_dist:.2f} m")
+            self.front_dist = np.nanmin(self.front_slice)
+            back_dist = np.nanmin(back_slice)
+            safety_dist = np.nanmin(safety_slice)
         except ValueError:
             # happens if all readings in a slice are 'nan'
             self.get_logger().warn("laser readings are 'nan'. Skipping loop.", throttle_duration_sec=1)
             return
         
-        if front_dist < self.min_front_obstacle_distance:
-            if self.state != 'OBSTACLE_AVOIDANCE':
-                self.get_logger().warn(f"Obstacle detected at {front_dist:.2f} m! Stopping robot.", throttle_duration_sec=1)
-                self.state = 'OBSTACLE_AVOIDANCE'
+        obstacle_close = self.front_dist < self.min_front_obstacle_distance
+        self.obstacle_behind = back_dist < self.min_back_obstacle_distance
+        self.safety_dist_critical = safety_dist < self.safety_distance
+
+        if obstacle_close and self.obstacle_state == 'CLEAR':
+            # 1. New unmapped obstacle detected!
+            self.get_logger().warn(f"Obstacle detected at {self.front_dist:.2f} m! Initiating avoidance maneuvers.")
+            self.state = 'OBSTACLE_AVOIDANCE'
+            self.obstacle_state = 'RETREATING'
+            self.move_ttbot(0.0, 0.0) # Stop immediately
+            self.current_retreat_distance = 0.0
+
+        elif self.safety_dist_critical and self.obstacle_state == 'CLEAR':
+            # Emergency stop if something is too close in safety zones
+            self.state = 'OBSTACLE_AVOIDANCE'
+            self.move_ttbot(0.0, 0.0) # Stop immediately
+            self.get_logger().warn(f"Critical obstacle detected at {safety_dist:.2f} m in safety zone! Initiating avoidance maneuver.")
+            self.obstacle_state = 'RETREATING'
+            self.current_retreat_distance = 0.0
+
+             
+        if self.obstacle_state == 'DETECTED':
+            self.current_retreat_distance = 0.0
+            self.obstacle_state = 'RETREATING'
+
+    def replan_with_obstacle(self):
+        """!
+        Adds the detected obstacle to the map costmap and runs A* planning again.
+        """
+
+        obs_grid_coords = self._world_to_grid(self.obstacle_pos_world)
+        obs_y, obs_x = obs_grid_coords
+
+        static_safety_buffer_m = self.inflation_kernel_size * self.map_processor.map.resolution
+
+        total_radius_m = (self.estimated_diameter / 2.0) + static_safety_buffer_m
+        self.get_logger().info(f"Inflating obstacle with total radius: {total_radius_m:.2f} m")
+        
+
+        resolution = self.map_processor.map.resolution
+        pixel_radius = int(total_radius_m / resolution)
+        
+        self.get_logger().info(f"Adding obstacle to map at grid pos ({obs_y}, {obs_x}) with radius {pixel_radius} cells.")
+        
+        H, W = self.map_processor.inf_map_img_array.shape
+        Y, X = np.ogrid[-obs_y:H-obs_y, -obs_x:W-obs_x]
+
+        mask = X**2 + Y**2 <= pixel_radius**2
+        
+
+        self.map_processor.inf_map_img_array[mask] = 1 
+        
+
+        self._publish_inflated_map()
+        self.map_processor.get_graph_from_map()
+        
+        self.get_logger().info("Graph updated with new obstacle.")
+        self.state = 'RRT*PATH_FOLLOWING'
+        self.final_goal_pose = self.goal_pose
+        # Set Goal for RRT* 10 indexes ahead of current position on path
+        if self.closest_idx + 30 < len(self.path.poses):
+            self.RRT_goal_pose = self.path.poses[self.closest_idx + 30]
+        else:
+            self.RRT_goal_pose = self.path.poses[-1]
+
+        
+        empty_path = Path()
+        empty_path.header.stamp = self.get_clock().now().to_msg()
+        empty_path.header.frame_id = 'map'
+        self.path_pub.publish(empty_path)
+
+        # 2. Reset Internal Path Data
+        self.path = Path()  # Clears the path object used for following
+        self.current_path_idx = 0 
+        self.shortcut_active = False
+        
+
+
+        if self.goal_pose is not None:
+            #self.path = self.a_star_path_planner(self.ttbot_pose, self.goal_pose)
+            self.__goal_pose_cbk(self.RRT_goal_pose)
+            if self.path.poses:
+                self.get_logger().info("Replanning successful. Resuming path following.")
+                self.path_pub.publish(self.path)
+                self.current_path_idx = 0
+                self.obstacle_state = 'CLEAR'
+                
+            else:
+                self.get_logger().error("Replanning failed. No valid path to goal.")
+                self.move_ttbot(0.0, 0.0)
+        else:
+            self.get_logger().warn("Goal was cleared during replanning. Stopping.")
             self.move_ttbot(0.0, 0.0)
+            self.obstacle_state = 'CLEAR' # Clear status if no goal is set
 
     def publish_initial_pose(self):
         """
@@ -610,6 +779,189 @@ class Task2(Node):
 
         self.initial_pose_timer.cancel()
 
+    def recalculate_obstacle_position(self):
+
+        obstacle_slice_index = np.nanargmin(self.front_slice)
+
+        if obstacle_slice_index < 28:
+            full_scan_index = obstacle_slice_index
+        else:
+            full_scan_index = 332 + (obstacle_slice_index - 28)
+
+        ranges = np.array(self.scan_msg.ranges) # Use raw ranges array
+        idx_start, idx_end = self._find_obstacle_cluster_bounds(
+            ranges, 
+            full_scan_index, jump_threshold=0.3)
+        
+        angular_width_rad = (idx_end - idx_start + 1) * self.scan_msg.angle_increment
+
+
+        center_index = int((idx_start + idx_end) / 2)
+        
+
+        raw_angle = center_index * self.scan_msg.angle_increment + self.scan_msg.angle_min
+
+        angle_from_robot_centerline = raw_angle
+        
+        # Normalize to [-pi, pi] to ensure shortest signed angle
+        if angle_from_robot_centerline > math.pi:
+            angle_from_robot_centerline -= 2 * math.pi
+        elif angle_from_robot_centerline < -math.pi:
+            angle_from_robot_centerline += 2 * math.pi
+
+        
+        if abs(angle_from_robot_centerline) > math.radians(45)  and self.obstacle_state == 'ALIGNING_TO_OBS':
+            self.move_ttbot(0.0, 0.0)
+            if self.goal_pose is not None:
+            #self.path = self.a_star_path_planner(self.ttbot_pose, self.goal_pose)
+                self.__goal_pose_cbk(self.goal_pose)
+                if self.path.poses:
+                    self.get_logger().info("Replanning successful. Resuming path following.")
+                    self.path_pub.publish(self.path)
+                    self.current_path_idx = 0
+                    self.obstacle_state = 'CLEAR'
+
+        elif abs(angle_from_robot_centerline) > math.radians(18) and self.obstacle_state == 'ALIGNING_TO_OBS':
+            angular_speed = self.kp_final_yaw * angle_from_robot_centerline
+            angular_speed = np.clip(angular_speed, -self.rotspeed_max, self.rotspeed_max)
+            self.move_ttbot(0.0, angular_speed)
+            #self.get_logger().info(f"Rotating to align with obstacle")
+            self.get_logger().info(f"Angle to obstacle: {math.degrees(angle_from_robot_centerline):.2f} degrees")
+            return
+            
+        else:
+            self.move_ttbot(0.0, 0.0)
+            self.get_logger().info(f"Aligned with obstacle. Calculating position.")
+            self.obstacle_state = 'REPLANNING' 
+
+        cluster_ranges = ranges[idx_start:idx_end + 1]
+        obs_dist = np.nanmean(cluster_ranges)
+
+        if obs_dist >= 1.0:
+            self.get_logger().warn(f"Obstacle at {obs_dist:.2f} m is too far for reliable estimation")
+            self.move_ttbot(0.0, 0.0)
+            if self.goal_pose is not None:
+            #self.path = self.a_star_path_planner(self.ttbot_pose, self.goal_pose)
+                self.__goal_pose_cbk(self.goal_pose)
+                if self.path.poses:
+                    self.get_logger().info("Replanning successful. Resuming path following.")
+                    self.path_pub.publish(self.path)
+                    self.current_path_idx = 0
+                    self.obstacle_state = 'CLEAR'
+
+
+        self.estimated_diameter = self.estimate_obstacle_diameter(angular_width_rad, obs_dist)
+        self.estimated_diameter = min(self.estimated_diameter, self.max_obstacle_diameter)
+        self.get_logger().info(f"Angle to obstacle center: {math.degrees(angle_from_robot_centerline):.2f} degrees")
+        self.get_logger().info(f"Estimated obstacle diameter: {self.estimated_diameter:.2f} m")
+
+        
+        quat = self.ttbot_pose.pose.orientation
+        siny_cosp = 2 * (quat.w * quat.z + quat.x * quat.y)
+        cosy_cosp = 1 - 2 * (quat.y * quat.y + quat.z * quat.z)
+        robot_theta = math.atan2(siny_cosp, cosy_cosp)
+
+        R_obs = self.estimated_diameter / 2.0
+        distance_to_center = obs_dist + R_obs
+        
+        world_angle_to_center = robot_theta + angle_from_robot_centerline 
+        
+        # calculate obstacle position in world frame
+        obs_world_x = self.ttbot_pose.pose.position.x + distance_to_center * math.cos(world_angle_to_center)
+        obs_world_y = self.ttbot_pose.pose.position.y + distance_to_center * math.sin(world_angle_to_center)
+        
+        self.obstacle_pos_world = (obs_world_x, obs_world_y)
+        
+        self.get_logger().warn(f"Unmapped obstacle detected at {self.front_dist:.2f}m. Triggering replanning.")
+        self.get_logger().info(f"Estimated obstacle position (world): x={obs_world_x:.2f}, y={obs_world_y:.2f}")
+        
+    def estimate_obstacle_diameter(self, delta_angle_rad, distance_m):
+        """
+        Estimates the diameter (chord length) of an object using its angular width and distance.
+        """
+        if distance_m <= 0 or delta_angle_rad <= 0:
+            return 0.0
+
+        # Formula: L = 2 * R * sin(Delta_theta / 2)
+        estimated_diameter = 2 * distance_m * math.sin(delta_angle_rad / 2.0)
+        
+        return estimated_diameter
+
+    def _find_obstacle_cluster_bounds(self, ranges, min_index, jump_threshold):
+        """
+        Dynamically finds the start and end indices of the obstacle cluster 
+        centered around the minimum distance reading.
+        
+        @param ranges: The full 360-degree Lidar ranges array.
+        @param min_index: The index of the minimum distance reading (front_dist).
+        @param jump_threshold: The meter difference to signal an object edge.
+        @return: (index_start, index_end) in the ranges array.
+        """
+        num_readings = len(ranges)
+        
+        # --- 1. Find Start Index (Scan backward from min_index) ---
+        index_start = min_index
+        for i in range(min_index, 0, -1):
+            # Stop if distance jumps significantly
+            if abs(ranges[i] - ranges[i - 1]) > jump_threshold:
+                index_start = i
+                break
+        
+        # --- 2. Find End Index (Scan forward from min_index) ---
+        index_end = min_index
+        for i in range(min_index, num_readings - 1):
+            # Stop if distance jumps significantly
+            if abs(ranges[i + 1] - ranges[i]) > jump_threshold:
+                index_end = i
+                break
+        
+        # Basic wrap-around check for simplicity (assumes obstacle is in the front slice)
+        if index_start == min_index and index_end == min_index:
+            # If no jump found, object might be large, use a default range (e.g., 20 indices wide)
+            pass 
+
+        return index_start, index_end
+
+    def _publish_inflated_map(self):
+        """
+        Converts the local self.map_processor.inf_map_img_array (0 or 1) 
+        into a nav_msgs/OccupancyGrid and publishes it to /custom_costmap.
+        """
+        if self.map_processor.inf_map_img_array.size == 0 or self.map_processor.map.height == 0:
+            return
+
+        map_msg = OccupancyGrid()
+        map_info = self.map_processor.map
+
+        # 1. Set Header (Essential for RViz visualization)
+        map_msg.header.stamp = self.get_clock().now().to_msg()
+        map_msg.header.frame_id = 'map' 
+
+        # 2. Set Info (Metadata)
+        map_msg.info.resolution = map_info.resolution
+        map_msg.info.width = self.map_processor.inf_map_img_array.shape[1]
+        map_msg.info.height = self.map_processor.inf_map_img_array.shape[0]
+        map_msg.info.origin.position.x = map_info.origin[0]
+        map_msg.info.origin.position.y = map_info.origin[1]
+        map_msg.info.origin.orientation.w = 1.0 # Assuming no initial map rotation
+
+        # 3. Process Array Data
+        # ROS OccupancyGrid expects 100=Occupied, 0=Free, -1=Unknown.
+        # Your inf_map_img_array uses 1=Occupied, 0=Free.
+        
+        # Convert local values (0 or 1) to ROS values (0 or 100)
+        ros_data = self.map_processor.inf_map_img_array * 100 
+        
+        # ROS message expects rows to be stored from bottom-to-top. 
+        # Since your NumPy array is flipped (row 0 is top row), flip it back 
+        # before flattening and converting to a list.
+        ros_array_flipped = np.flipud(ros_data)
+        
+        # Flatten the array and convert it to a standard list of integers
+        map_msg.data = ros_array_flipped.flatten().astype(np.int8).tolist()
+        
+        # 4. Publish
+        self.inflated_map_pub.publish(map_msg)
 
 class Queue():
     def __init__(self, init_queue = []):
@@ -867,6 +1219,8 @@ class MapProcessor():
         self.inf_map_img_array[self.inf_map_img_array > 0] = 1
                 
     def get_graph_from_map(self):
+
+        self.map_graph.g = {}
         # Create the nodes that will be part of the graph, considering only valid nodes or the free space
         for i in range(self.map.image_array.shape[0]):
             for j in range(self.map.image_array.shape[1]):
@@ -940,6 +1294,230 @@ class MapProcessor():
             path_array[tup] = 0.5
         return path_array
 
+class RRTStarGrid:
+    """
+    RRT* Path Planner adapted for a discrete grid environment.
+    This uses the grid nodes for sampling and path generation.
+    """
+    def __init__(self, map_processor, step_size=5, search_radius=10, max_iterations=5000, node_instance=None):
+        # The MapProcessor contains the inflated map (inf_map_img_array)
+        self.map_processor = map_processor
+        self.map_array = map_processor.inf_map_img_array
+        self.height, self.width = self.map_array.shape
+        
+        # RRT* specific parameters (in grid units/pixels)
+        self.step_size = step_size
+        self.search_radius = search_radius
+        self.max_iterations = max_iterations
+        
+        # Node structure for RRT* (parent, cost, children list)
+        # We will use a dictionary mapping grid node names ('y,x') to RRT* properties
+        self.node_instance = node_instance
+        self.nodes = {} 
+
+    def _get_node_name(self, y, x):
+        return f"{y},{x}"
+
+    def _sample_free(self):
+        """Randomly samples a free pixel/node in the grid."""
+        while True:
+            y = random.randint(0, self.height - 1)
+            x = random.randint(0, self.width - 1)
+            if self.map_array[y, x] == 0:  # Check if it's free space (0)
+                return y, x
+
+    def _find_nearest_node(self, y_rand, x_rand):
+        """Finds the nearest node already in the tree using Euclidean distance."""
+        min_dist_sq = float('inf')
+        nearest_node_name = None
+        
+        for name in self.nodes.keys():
+            y_node, x_node = map(int, name.split(','))
+            dist_sq = (x_rand - x_node)**2 + (y_rand - y_node)**2
+            
+            if dist_sq < min_dist_sq:
+                min_dist_sq = dist_sq
+                nearest_node_name = name
+        
+        return nearest_node_name
+
+    def _steer(self, name_nearest, y_rand, x_rand):
+        """
+        Steers from the nearest node toward the sampled point by 'step_size' distance.
+        Returns the new node's grid coordinates (y_new, x_new).
+        """
+        y_near, x_near = map(int, name_nearest.split(','))
+        
+        angle = math.atan2(y_rand - y_near, x_rand - x_near)
+        
+        y_new = y_near + int(self.step_size * math.sin(angle))
+        x_new = x_near + int(self.step_size * math.cos(angle))
+        
+        # Clamp new coordinates to map bounds
+        y_new = np.clip(y_new, 0, self.height - 1)
+        x_new = np.clip(x_new, 0, self.width - 1)
+        
+        name_new = self._get_node_name(y_new, x_new)
+        
+        # Check if the path to the new node is collision-free (reuse Bresenham logic)
+        if self.map_array[y_new, x_new] == 0 and self.node_instance._is_path_clear((y_near, x_near), (y_new, x_new)):
+            return name_new, y_new, x_new
+        return None, None, None
+
+    def _find_near_nodes(self, y_new, x_new):
+        """Finds all nodes within the search_radius of the new node."""
+        near_nodes = []
+        for name in self.nodes.keys():
+            y_node, x_node = map(int, name.split(','))
+            dist_sq = (x_new - x_node)**2 + (y_new - y_node)**2
+            if dist_sq <= self.search_radius**2:
+                # Add the cost of traveling between nodes (distance)
+                distance = math.sqrt(dist_sq) 
+                near_nodes.append((name, distance))
+        return near_nodes
+
+    def _rewire(self, name_new, near_nodes):
+        """
+        RRT* Rewiring: Checks if any near node can be reached cheaper 
+        through the new node, and updates their parent if so.
+        """
+        cost_new = self.nodes[name_new]['cost']
+        
+        for name_near, dist_to_near in near_nodes:
+            if name_near == name_new:
+                continue
+
+            # Cost if 'name_new' becomes the parent of 'name_near'
+            cost_through_new = cost_new + dist_to_near
+
+            if cost_through_new < self.nodes[name_near]['cost']:
+                # Check for collision-free path (critical for grid safety)
+                y_new, x_new = map(int, name_new.split(','))
+                y_near, x_near = map(int, name_near.split(','))
+                
+                if self.node_instance._is_path_clear((y_new, x_new), (y_near, x_near)):
+                    self.nodes[name_near]['parent'] = name_new
+                    self.nodes[name_near]['cost'] = cost_through_new
+                    # Note: Full RRT* implementation would require recursively 
+                    # updating the cost of all descendants of name_near.
+                    
+    def _reconstruct_rrt_path(self, start_name, end_name):
+        """Reconstructs the path from end_name back to start_name."""
+        path_names = []
+        current = end_name
+        total_cost = self.nodes[end_name]['cost']
+
+        while current is not None:
+            path_names.append(current)
+            if current == start_name:
+                break
+            current = self.nodes[current]['parent']
+        
+        return path_names[::-1], total_cost
+
+    def solve(self, start_grid, end_grid):
+        """
+        Main RRT* solving loop.
+        @param start_grid: (y, x) tuple of the starting grid coordinates.
+        @param end_grid: (y, x) tuple of the ending grid coordinates.
+        """
+        start_name = self._get_node_name(*start_grid)
+        end_name = self._get_node_name(*end_grid)
+        
+        # 1. Initialize the tree with the start node
+        self.nodes = {
+            start_name: {'parent': None, 'cost': 0.0}
+        }
+        
+        # Reuse MapProcessor's _is_path_clear method (needs self to call correctly)
+        #self.map_processor._is_path_clear = lambda start, end: self.map_processor._is_path_clear(start, end)
+        
+        final_path = None
+        min_cost = float('inf')
+
+        # 
+
+        for i in range(self.max_iterations):
+            # 2. Sample Free Space
+            y_rand, x_rand = self._sample_free()
+            
+            # 3. Find Nearest Node
+            name_nearest = self._find_nearest_node(y_rand, x_rand)
+            if name_nearest is None:
+                continue
+            
+            # 4. Steer (Create new node if path is collision-free)
+            name_new, y_new, x_new = self._steer(name_nearest, y_rand, x_rand)
+            if name_new is None or name_new in self.nodes:
+                continue
+            
+            # 5. Find Near Nodes
+            near_nodes = self._find_near_nodes(y_new, x_new)
+            
+            # 6. Choose Best Parent (Connect new node to the best parent)
+            cost_min = self.nodes[name_nearest]['cost'] + self.step_size # Base cost from nearest node
+            parent_name = name_nearest
+            
+            for name_near, dist_to_near in near_nodes:
+                cost_through_near = self.nodes[name_near]['cost'] + dist_to_near
+                
+                # Check collision free path from near node to new node
+                y_near, x_near = map(int, name_near.split(','))
+                if (cost_through_near < cost_min and 
+                    self.node_instance._is_path_clear((y_near, x_near), (y_new, x_new))):
+                    
+                    cost_min = cost_through_near
+                    parent_name = name_near
+
+            # 7. Add New Node to Tree
+            self.nodes[name_new] = {'parent': parent_name, 'cost': cost_min}
+            
+            # 8. Rewire (Optimize paths of neighbors through the new node)
+            self.rewire(name_new, near_nodes)
+            
+            # 9. Check if the new node is close enough to the goal
+            dist_to_goal = math.sqrt((x_new - end_grid[1])**2 + (y_new - end_grid[0])**2)
+            if dist_to_goal < self.step_size and self.node_instance._is_path_clear((y_new, x_new), end_grid):
+                
+                # Calculate cost to reach the goal through the new node
+                cost_to_goal = cost_min + dist_to_goal
+                
+                if cost_to_goal < min_cost:
+                    # Temporarily add the final connection to the node structure for path reconstruction
+                    self.nodes[end_name] = {'parent': name_new, 'cost': cost_to_goal}
+                    final_path, final_cost = self._reconstruct_rrt_path(start_name, end_name)
+                    min_cost = final_cost
+                    # Keep iterating to potentially find a better path (RRT* property)
+                    
+        if final_path:
+            return final_path, min_cost
+        
+        return [], np.inf
+
+    def rewire(self, name_new, near_nodes):
+        """Simple wrapper to ensure the method is callable from within solve."""
+        self._rewire(name_new, near_nodes)
+        
+    def path_to_pose_stamped(self, path_names, path_dist):
+        """
+        Converts the list of grid coordinate strings (path_names) into a ROS Path message.
+        """
+        path = Path()
+        path.header.stamp = self.node_instance.get_clock().now().to_msg()
+        path.header.frame_id = 'map'
+        
+        for name in path_names:
+            grid_coords = tuple(map(int, name.split(',')))
+            world_coords = self.node_instance._grid_to_world(grid_coords)
+            
+            pose = PoseStamped()
+            pose.header = path.header
+            pose.pose.position.x = world_coords[0]
+            pose.pose.position.y = world_coords[1]
+            pose.pose.orientation.w = 1.0 # Assuming orientation is handled by controller 
+            path.poses.append(pose)
+            
+        return path
 
 def main(args=None):
     rclpy.init(args=args)
