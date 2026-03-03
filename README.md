@@ -117,9 +117,9 @@ IDLE → ASTARPATH_FOLLOWING → RETREATING → WALL_FOLLOWING → MAP_EXPLORED
 
 **Mapping demo:**
 
-https://github.com/user-attachments/assets/Mapping.mov
+![Autonomous mapping demo](figures/Mapping.gif)
 
-> *[figures/Mapping.mov](figures/Mapping.mov) — Autonomous frontier exploration building the house map from scratch*
+*Autonomous frontier exploration building the house map from scratch.*
 
 ---
 
@@ -222,9 +222,9 @@ The robot navigates the environment using its RGB camera to detect, approach, an
 
 **Ball tracking demo:**
 
-https://github.com/user-attachments/assets/ball_tracker.mov
+![Ball tracking demo](figures/ball_tracker.gif)
 
-> *[figures/ball_tracker.mov](figures/ball_tracker.mov) — Robot detecting and approaching all three colored balls*
+*Robot detecting and approaching all three colored balls.*
 
 ---
 
