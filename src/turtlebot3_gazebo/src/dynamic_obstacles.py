@@ -13,7 +13,7 @@ from rclpy.node import Node
 class GazeboModelHandler(Node):
 
     def __init__(self):
-        super().__init__('gazebo_model_handler')
+        super().__init__('dynamic_obstacles')
         self.spawn_client = self.create_client(SpawnEntity, 'spawn_entity')
         self.set_state_client = self.create_client(SetEntityState, 'set_entity_state')
 

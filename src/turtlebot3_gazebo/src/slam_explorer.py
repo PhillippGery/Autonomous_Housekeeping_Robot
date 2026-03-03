@@ -30,12 +30,12 @@ from tf2_ros.buffer import Buffer
 from tf2_ros.transform_listener import TransformListener
 
 
-class Task1(Node):
+class SlamExplorer(Node):
     """
     Autonmous mapping and navigation class for Turtlebot3 using A* path planning
     """
     def __init__(self):
-        super().__init__('task1_node')
+        super().__init__('slam_explorer')
 
         self.path = Path()
         self.goal_pose = None
@@ -1612,14 +1612,14 @@ class WallFollower:
 def main(args=None):
     rclpy.init(args=args)
 
-    task1 = Task1()
+    slam_explorer = SlamExplorer()
 
     try:
-        rclpy.spin(task1)
+        rclpy.spin(slam_explorer)
     except KeyboardInterrupt:
         pass
     finally:
-        task1.destroy_node()
+        slam_explorer.destroy_node()
         rclpy.shutdown()
 
 

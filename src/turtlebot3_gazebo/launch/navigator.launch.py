@@ -40,7 +40,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'bonus',
             default_value='false',
-            description='Launches task2_bonus'
+            description='Launches map_navigator_RRT_star instead of map_navigator'
         ),
         DeclareLaunchArgument(
             'spawn_objects',
@@ -73,8 +73,8 @@ def generate_launch_description():
 
         Node(
             package='turtlebot3_gazebo',
-            executable='static_obstacles_task3.py',
-            name='static_obstacles_task3',
+            executable='dynamic_obstacles.py',
+            name='dynamic_obstacles',
             output='screen',
             condition=IfCondition(LaunchConfiguration('spawn_objects'))
         ),
@@ -113,11 +113,11 @@ def generate_launch_description():
             }]
         ),
 
-        # Task2 Algorithm Node
+        # Map Navigator Node
         Node(
             package='turtlebot3_gazebo',
-            executable='task2.py',
-            name='task2_algorithm',
+            executable='map_navigator.py',
+            name='map_navigator',
             output='screen',
             parameters=[{
                 'use_sim_time': LaunchConfiguration('use_sim_time')
@@ -135,8 +135,8 @@ def generate_launch_description():
 
         Node(
             package='turtlebot3_gazebo',
-            executable='task2_bonus.py',
-            name='task2bonus_algorithm',
+            executable='map_navigator_RRT_star.py',
+            name='map_navigator_rrt_star',
             output='screen',
             parameters=[{
                 'use_sim_time': LaunchConfiguration('use_sim_time')
@@ -153,11 +153,11 @@ def generate_launch_description():
         ),
 
 
-        # Task3 Algorithm Node (for dynamic obstacles)
+        # Vision Navigator Node (for dynamic obstacles)
         Node(
             package='turtlebot3_gazebo',
-            executable='task3.py',
-            name='task3_algorithm',
+            executable='vision_navigator.py',
+            name='vision_navigator',
             output='screen',
             parameters=[{
                 'use_sim_time': LaunchConfiguration('use_sim_time')

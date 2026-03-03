@@ -26,12 +26,12 @@ from queue import PriorityQueue
 
 # Import other python packages that you think necessary
 
-class Task2(Node):
+class MapNavigatorRRTStar(Node):
     """
     Environment localization and navigation task.
     """
     def __init__(self):
-        super().__init__('task2_node')
+        super().__init__('map_navigator_rrt_star')
 
         self.path = Path()
         self.goal_pose = None
@@ -1519,14 +1519,14 @@ class RRTStarGrid:
 def main(args=None):
     rclpy.init(args=args)
 
-    task2 = Task2()
+    map_navigator_rrt_star = MapNavigatorRRTStar()
 
     try:
-        rclpy.spin(task2)
+        rclpy.spin(map_navigator_rrt_star)
     except KeyboardInterrupt:
         pass
     finally:
-        task2.destroy_node()
+        map_navigator_rrt_star.destroy_node()
         rclpy.shutdown()
 
 
