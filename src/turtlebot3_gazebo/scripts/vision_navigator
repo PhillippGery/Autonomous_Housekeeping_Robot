@@ -1,0 +1,3 @@
+#!/usr/bin/env python3
+from turtlebot3_gazebo.nodes.vision_node import main
+main()

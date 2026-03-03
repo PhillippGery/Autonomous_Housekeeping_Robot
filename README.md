@@ -1,247 +1,352 @@
-# 🤖 Autonomous Housekeeping Robot
+# Autonomous Housekeeping Robot
 
-A ROS2-based autonomous robot system built on **TurtleBot3** and simulated in **Gazebo**, capable of exploring unknown environments, navigating using A* path planning with RRT* reactive local planning, detecting and avoiding obstacles, and tracking colored objects using computer vision.
+<p align="center">
+  <img src="https://img.shields.io/badge/ROS2-Humble-blue?logo=ros&logoColor=white" />
+  <img src="https://img.shields.io/badge/Python-3.10-blue?logo=python&logoColor=white" />
+  <img src="https://img.shields.io/badge/Gazebo-11-orange?logo=gazebo&logoColor=white" />
+  <img src="https://img.shields.io/badge/MATLAB-R2023b-red?logo=mathworks&logoColor=white" />
+  <img src="https://img.shields.io/badge/Platform-TurtleBot3%20Waffle-blueviolet" />
+  <img src="https://img.shields.io/badge/License-MIT-green" />
+</p>
 
+A fully autonomous robot system built on **TurtleBot3 Waffle** and simulated in **Gazebo**, capable of exploring unknown environments, navigating pre-built maps, detecting and avoiding obstacles, and tracking colored objects using computer vision — all orchestrated through a modular ROS2 Python package.
 
 ---
 
-## 📋 Table of Contents
+## Table of Contents
 
 - [Overview](#overview)
 - [System Architecture](#system-architecture)
-- [Tasks](#tasks)
+- [Capabilities](#capabilities)
+  - [Task 1 — Autonomous Exploration & Mapping](#task-1--autonomous-exploration--mapping)
+  - [Task 2 — Localization & Navigation with Obstacle Avoidance](#task-2--localization--navigation-with-obstacle-avoidance)
+  - [Task 2 Bonus — RRT\* Reactive Local Planner](#task-2-bonus--rrt-reactive-local-planner)
+  - [Task 3 — Ball Detection & Autonomous Approach](#task-3--ball-detection--autonomous-approach)
 - [Key Algorithms](#key-algorithms)
 - [MATLAB PID Optimization](#matlab-pid-optimization)
-- [Configuration & Tuning](#configuration--tuning)
-- [Dependencies](#dependencies)
+- [Project Structure](#project-structure)
 - [Installation & Build](#installation--build)
 - [Running the Simulation](#running-the-simulation)
-- [Project Structure](#project-structure)
+- [Configuration Reference](#configuration-reference)
+- [ROS2 Topic Reference](#ros2-topic-reference)
+- [Dependencies](#dependencies)
 
 ---
 
 ## Overview
 
-This project implements a fully autonomous housekeeping robot that can:
+This project implements a complete autonomous navigation stack for a differential-drive robot operating in a house environment. The system is structured as a proper Python package (`turtlebot3_gazebo`) with shared utility modules, enabling clean separation of concerns between planning, control, sensing, and simulation management.
 
-- **Autonomously explore and map** an unknown environment using frontier-based SLAM exploration
-- **Localize itself** on a pre-built map using AMCL (Adaptive Monte Carlo Localization)
-- **Navigate** to user-defined goals using a **two-layer planner**: A* global planning + RRT* reactive local planning
-- **Detect and avoid** both static and dynamic obstacles in real time, estimating obstacle geometry from LiDAR
-- **Track colored balls** (red, green, blue) using computer vision and approach them autonomously
-- **Follow walls** in narrow spaces using a PID controller
-- **Optimized motion control** parameters via MATLAB multi-start fmincon optimization with noise modeling
+**Core capabilities:**
+- Frontier-based SLAM exploration to build a complete map from scratch
+- AMCL-based localization and goal-directed navigation on a pre-built map
+- Real-time dynamic obstacle detection, geometry estimation, and costmap integration
+- Two-layer planning: A\* global planner + RRT\* reactive local planner
+- Computer vision pipeline for colored ball detection, approach, and identification
+- MATLAB-optimized PID controller gains with actuator dynamics and sensor noise modeling
 
 ---
 
 ## System Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                        ROS2 Node                             │
-│                                                              │
-│   /map ──────────► SLAM Map Processor                        │
-│   /scan ─────────► Obstacle Detector / LiDAR Geometry Est.  │
-│   /odom ─────────► TF Transform (map ← odom)                 │
-│   /camera ───────► Ball Detector (Task 3)                    │
-│   /pose ─────────► AMCL Pose Estimator                       │
-│                           │                                  │
-│                    State Machine                             │
-│        ┌──────────────────┼───────────────────┐             │
-│      IDLE          ASTAR_PATH            WALL_FOLLOWING      │
-│        │            FOLLOWING                  │             │
-│        ▼                 ▼                     ▼             │
-│   Frontier        A* Global Path         PID Wall            │
-│   Selection       Follower               Follower            │
-│                          │                                   │
-│              ┌───────────┴────────────┐                      │
-│        No obstacle              Obstacle detected            │
-│              │                        │                      │
-│        Follow A* path       Stop → Align → Estimate size     │
-│                             Add to costmap                   │
-│                                       │                      │
-│                             RRT* Local Planner               │
-│                             (bypass segment)                 │
-│                                       │                      │
-│                             Reconnect to A* path             │
-│                                       │                      │
-│                           /cmd_vel publisher                  │
-└──────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│                     turtlebot3_gazebo Package                        │
+│                                                                      │
+│  ┌─────────────────────────────────────────────────────────────┐    │
+│  │                     Shared Utilities (common/)               │    │
+│  │   graph_utils.py     map_utils.py    geometry_utils.py       │    │
+│  │   A* / RRT*          Map loading     Coord transforms        │    │
+│  │   path planning      & inflation     polar / Euler           │    │
+│  │                                      lidar_utils.py          │    │
+│  │                                      Scan processing         │    │
+│  └─────────────────────────────────────────────────────────────┘    │
+│                               ▲                                      │
+│              ┌────────────────┼────────────────┐                    │
+│              │                │                │                    │
+│  ┌───────────┴────┐  ┌────────┴──────┐  ┌──────┴───────────────┐   │
+│  │frontier_       │  │global_planner_│  │vision_node.py        │   │
+│  │explorer_node   │  │node.py        │  │                      │   │
+│  │                │  │               │  │Camera → HSV → Detect │   │
+│  │SLAM + Frontier │  │AMCL + A* + PID│  │→ Approach → Identify │   │
+│  │exploration     │  │+ Obstacle avoid│  └──────────────────────┘   │
+│  └────────────────┘  └───────────────┘                              │
+│                                                                      │
+│  ┌──────────────────┐  ┌───────────────────┐  ┌──────────────────┐  │
+│  │path_follower_    │  │obstacle_detector_ │  │costmap_node.py   │  │
+│  │node.py           │  │node.py            │  │                  │  │
+│  │PID polar-coord   │  │LiDAR geometry est.│  │Inflated costmap  │  │
+│  │path follower     │  │& costmap update   │  │publisher         │  │
+│  └──────────────────┘  └───────────────────┘  └──────────────────┘  │
+└──────────────────────────────────────────────────────────────────────┘
+              │
+              ▼
+     /cmd_vel → Gazebo → TurtleBot3 Waffle
 ```
 
 ---
 
-## Tasks
+## Capabilities
 
-### Task 1 — Autonomous Exploration & Mapping (`task1.py`)
+### Task 1 — Autonomous Exploration & Mapping
 
-The robot explores a completely **unknown environment** autonomously using frontier-based exploration combined with SLAM.
+The robot explores a **completely unknown environment** autonomously, building a map in real time using frontier-based SLAM exploration.
 
-**How it works:**
-- Subscribes to the live `/map` topic from a SLAM node
-- Identifies **frontier cells** — free cells adjacent to unknown cells — as exploration targets
-- Ranks frontiers using a cost function balancing **distance** and **information gain**
-- Plans a path to the best frontier using A* on the live map graph
-- Inflates only wall obstacles (not unknown cells) for safe clearance without blocking exploration
-- Switches to **wall following** mode in narrow/unknown spaces
-- Corrects odometry drift using SLAM TF transforms
-- Declares exploration complete when less than 1% of known cells remain unexplored and no path is possible
+<details>
+<summary><b>How it works</b></summary>
 
-**Key design decisions:**
-- Frontiers require at least 5 free neighbors and a minimum distance of 0.6 m to avoid trivial targets
-- Skips angle alignment at waypoints (saves time without sacrificing accuracy)
-- Wall follower acts as fallback for narrow corridors where A* planning fails
+1. Subscribes to the live `/map` OccupancyGrid from SLAM Toolbox
+2. Identifies **frontier cells** — free cells directly adjacent to unknown cells — using a fast neighbor-scan approach
+3. Ranks frontiers by a composite cost function balancing travel distance and information gain
+4. Plans a collision-free path to the best frontier using A\* on the inflated live map
+5. Follows the path using the PID polar-coordinate path follower
+6. Switches to **wall-following** mode when A\* planning fails in narrow corridors
+7. Declares exploration complete when fewer than 1% of known cells remain unexplored
 
-**State Machine:**
+**Frontier selection constraints:**
+- Requires ≥ 5 free neighbors (avoids trivial single-cell frontiers)
+- Minimum distance 0.6 m from robot (avoids targeting the robot's own footprint)
+- Inflates wall cells only — unknown cells are left open to allow planning into unexplored space
+
+</details>
+
+**State machine:**
 ```
 IDLE → ASTARPATH_FOLLOWING → RETREATING → WALL_FOLLOWING → MAP_EXPLORED
 ```
 
+**Mapping demo:**
+
+https://github.com/user-attachments/assets/Mapping.mov
+
+> *[figures/Mapping.mov](figures/Mapping.mov) — Autonomous frontier exploration building the house map from scratch*
+
 ---
 
-### Task 2 — Localization & Navigation with Obstacle Avoidance (`task2.py`)
+### Task 2 — Localization & Navigation with Obstacle Avoidance
 
-The robot navigates a **known, pre-built map** to user-defined goals while avoiding dynamic obstacles detected at runtime.
+The robot navigates a **known pre-built map** to user-defined goals while detecting and avoiding dynamic obstacles not present on the map.
 
-**How it works:**
-- Loads a pre-built `.yaml` map and inflates obstacles for safe path planning
-- Uses **AMCL** for localization on the known map
-- Accepts navigation goals from RViz (`/move_base_simple/goal`)
-- Plans paths with A* and follows them using a PID path follower
-- When an unmapped obstacle is detected:
-  1. Stops and retreats (dual safety zones: front + back during retreat)
-  2. Aligns to face the obstacle directly
-  3. Estimates the obstacle's **diameter** using LiDAR jump detection: `L = 2R · sin(Δθ/2)`
-  4. Calculates world-frame obstacle center position
-  5. Adds the obstacle to the costmap with correct inflation
-  6. Replans around it using A*
-  7. Resets costmap after goal reached to avoid accumulating phantom obstacles
-- Publishes the inflated costmap to `/custom_costmap` for visualization in RViz
+<details>
+<summary><b>How it works</b></summary>
 
-**State Machine:**
+1. Loads the pre-built map from `maps/map.yaml` and inflates obstacle cells for clearance
+2. Uses **AMCL** (Adaptive Monte Carlo Localization) for robust pose estimation on the known map
+3. Accepts navigation goals via RViz (`/move_base_simple/goal`)
+4. Plans a global path using A\* and follows it with the PID path follower
+5. On obstacle detection (LiDAR range < threshold):
+   - **Retreat**: reverses a fixed distance (dual safety zones: front + rear)
+   - **Align**: rotates to face the obstacle directly
+   - **Estimate**: measures obstacle diameter from LiDAR angular sweep using the chord formula
+   - **Update costmap**: marks the obstacle's world-frame footprint on the costmap
+   - **Replan**: re-runs A\* to route around the new obstacle
+6. Resets dynamic costmap entries after reaching the goal
+
+</details>
+
+**State machine:**
 ```
 IDLE → ASTARPATH_FOLLOWING → RETREATING → ALIGNING_TO_OBS → REPLANNING → ASTARPATH_FOLLOWING
 ```
 
----
+**Obstacle avoidance:**
 
-### Task 2 Bonus — RRT* Reactive Local Planner (`task2_bonus.py`)
+![Obstacle Avoidance](figures/Obstackle_Avoidance_exaple.png)
 
-Extension of Task 2 that introduces a **two-layer planning architecture** combining A* global planning with an **RRT* local planner** (`RRTStarGrid` class) for reactive obstacle avoidance.
-
-**Architecture:**
-```
-Global Layer:  A* plans full path from start to goal on static map
-                          │
-                          ▼
-Local Layer:   Obstacle detected mid-execution
-                          │
-               Stop → Estimate geometry → Add to costmap
-                          │
-               RRT* plans local bypass path segment
-               (from current position to a point ahead on the A* path)
-                          │
-               Execute bypass → Reconnect to A* global path
-                          │
-               Replan A* from reconnection point to final goal
-```
-
-**Why RRT* as local planner:**
-- RRT* (Rapidly-exploring Random Tree Star) efficiently finds collision-free paths in continuous space with asymptotic optimality
-- Unlike re-running full A* (grid-based, discrete), RRT* explores the local configuration space and finds smooth bypass paths
-- The robot autonomously visits randomly selected valid waypoints in sequence, demonstrating fully autonomous patrol-style navigation without any user input
+*Robot detecting, estimating, and routing around a dynamic obstacle placed in its path.*
 
 ---
 
-### Task 3 — Ball Detection & Navigation (`task3.py`)
+### Task 2 Bonus — RRT\* Reactive Local Planner
 
-The robot navigates the environment and uses its **camera** to detect and approach colored balls (red, green, blue).
+Extension of Task 2 introducing a **two-layer planning architecture** where a global A\* plan is augmented by an RRT\* local planner that reactively bypasses newly detected obstacles.
 
-**How it works:**
-- Uses OpenCV HSV color segmentation to detect colored balls in the camera image
-- **Circularity filter** (threshold > 0.75) rejects bricks and non-spherical objects, eliminating false detections
-- Adaptive HSV thresholds handle near/large objects that fill the image
-- Pipeline: Align → Estimate world position → Plan approach with correct final orientation → Re-estimate at close range → Identify color via mask overlap
-- Distance estimated from known physical diameter vs. apparent pixel size
-- A PID controller centers the robot on the ball and drives toward it
-- Stores world position of detected balls for revisiting; falls back to A* between ball-seeking behaviors
-- Estimation accuracy: ≥ 0.01 m
+<details>
+<summary><b>Architecture</b></summary>
+
+```
+Global Layer:   A* plans full path from start → goal on the static inflated map
+                         │
+                         ▼ Robot follows global path
+                    Obstacle detected mid-execution
+                         │
+                   Stop → Estimate obstacle geometry
+                   Add obstacle footprint to local costmap
+                         │
+Local Layer:    RRT* plans bypass segment:
+                current_position → reconnect_point (next A* waypoint ahead)
+                         │
+                Execute RRT* bypass → arrive at reconnect point
+                         │
+                Replan A* from reconnect_point → final goal
+```
+
+</details>
+
+**Why RRT\* as local planner:**
+- Operates in continuous space — produces smooth, non-grid-aligned bypass paths
+- Asymptotically optimal: rewires the tree to minimize cumulative cost
+- Scoped to the local planning area around the obstacle — fast per invocation
+- Naturally handles non-convex local obstacle shapes that confuse grid-based replanning
+
+**State machine:**
+```
+IDLE → ASTARPATH_FOLLOWING → RETREATING → ALIGNING_TO_OBS
+     → RRTSTAR_PLANNING → RRTSTAR_FOLLOWING → REPLANNING → ASTARPATH_FOLLOWING
+```
+
+---
+
+### Task 3 — Ball Detection & Autonomous Approach
+
+The robot navigates the environment using its RGB camera to detect, approach, and identify colored balls (red, green, blue).
+
+<details>
+<summary><b>How it works</b></summary>
+
+**Detection pipeline:**
+1. Converts each camera frame to HSV color space
+2. Applies per-color HSV masks (with adaptive thresholds for large/close objects)
+3. Finds contours and applies a **circularity filter** (threshold > 0.75) to reject bricks and walls
+4. Estimates 3D ball position: `distance = (physical_diameter × focal_length) / pixel_diameter`
+
+**Approach pipeline:**
+1. Align: rotate to center the detected ball in the frame
+2. Navigate: plan an A\* path to an approach waypoint with correct final orientation
+3. Re-estimate: refine position at close range using updated mask
+4. Identify: determine final color by majority mask vote
+
+**Published topics:** `/bbox`, `/red_pos`, `/blue_pos`, `/green_pos`
+
+</details>
+
+**Ball tracking demo:**
+
+https://github.com/user-attachments/assets/ball_tracker.mov
+
+> *[figures/ball_tracker.mov](figures/ball_tracker.mov) — Robot detecting and approaching all three colored balls*
 
 ---
 
 ## Key Algorithms
 
-### A* Path Planning
-Implemented from scratch using a priority queue. Heuristic is Euclidean distance in grid space. Supports 8-directional movement (cardinal + diagonal, diagonal cost = √2). If the start or goal is inside an obstacle, the nearest valid free cell within a configurable radius is used instead.
+### A\* Path Planning (`common/graph_utils.py`)
 
-### RRT* Local Planner (`RRTStarGrid` class)
-Rapidly-exploring Random Tree Star operating on the robot's local costmap:
-- Samples random nodes in the local planning area around the robot
-- Extends the tree toward sampled points, checking for obstacle collisions in the costmap
-- Rewires the tree to minimize cumulative path cost (asymptotically optimal)
-- Triggered only upon obstacle detection; operates on the segment between current position and the next A* waypoint ahead
-- Returns a smooth, collision-free bypass path segment that reconnects to the global A* plan
+Custom implementation using a binary heap priority queue (`heapq`). Key properties:
 
-### Frontier-Based Exploration (Task 1)
-Frontiers are free cells adjacent to unknown cells. Ranked by:
-```
-cost = W_dist × euclidean_distance + W_power / local_area_gain
-```
-where `local_area_gain` is the fraction of unknown cells in a local window — rewarding frontiers that reveal large unexplored areas.
+- **Heuristic:** Euclidean distance (admissible, consistent)
+- **Movement:** 8-directional (cardinal cost = 1.0, diagonal cost = √2)
+- **Obstacle handling:** If start or goal falls inside an inflated obstacle cell, the nearest valid free cell within a configurable search radius is substituted
+- **Line-of-sight shortcutting:** Before selecting the next waypoint, Bresenham's line algorithm checks if a straight line to the final goal is collision-free — shortcuts directly if clear
 
-### Obstacle Geometry Estimation
-When an obstacle is detected, the robot aligns to face it and uses LiDAR angular sweep to detect the angular span via jump detection in range values. Obstacle diameter:
 ```
-L = 2R · sin(Δθ / 2)
+f(n) = g(n) + h(n)
+g(n) = accumulated path cost from start
+h(n) = euclidean_distance(n, goal)
 ```
-where R is the measured range and Δθ is the detected angular span. World-frame center position is calculated from robot pose and bearing.
 
-### PID Path Follower (Polar Coordinates)
-Converts Cartesian error to polar coordinates (ρ, α, β):
-- Linear speed: proportional to ρ (distance to lookahead point)
-- Angular speed: PID on α (heading error) + β correction term for final orientation alignment
+### RRT\* Local Planner (`common/graph_utils.py`)
+
+Rapidly-exploring Random Tree Star operating on the inflated costmap local to the detected obstacle:
+
+1. **Sample** a random point in the planning area
+2. **Extend** tree toward sample, respecting obstacle cells
+3. **Rewire** the neighborhood: for each node near the new node, check if routing through the new node reduces cost
+4. **Terminate** when a node reaches within tolerance of the target reconnection point
+
+Asymptotic optimality is guaranteed by the rewiring step — paths converge to the true optimal as iterations increase.
+
+### Frontier-Based Exploration (`nodes/frontier_explorer_node.py`)
+
+Frontiers are identified as free cells (value = 0) adjacent to unknown cells (value = −1) in the OccupancyGrid. Ranked by:
+
+```
+cost = W_dist × euclidean_distance(robot, frontier)
+     + W_power / local_area_gain(frontier)
+```
+
+where `local_area_gain` is the fraction of unknown cells in a local window centered on the frontier — rewarding frontiers that are likely to reveal large unexplored areas.
+
+### Obstacle Geometry Estimation (`nodes/obstacle_detector_node.py`)
+
+When an obstacle is detected, the robot aligns to face it, then sweeps the LiDAR to detect the angular span via range-jump detection. Obstacle diameter:
+
+```
+L = 2 × R × sin(Δθ / 2)
+```
+
+where `R` is the measured range to the obstacle center and `Δθ` is the detected angular span. The world-frame center coordinates are computed from robot pose and bearing, then marked on the costmap with the appropriate inflation radius.
+
+### PID Path Follower — Polar Coordinates (`nodes/path_follower_node.py`)
+
+Converts Cartesian tracking error to polar coordinates (ρ, α, β):
+
+```
+ρ     = distance to lookahead point
+α     = atan2(Δy, Δx) − θ_robot       (heading error, wrapped to [-π, π])
+β     = −θ_robot − α                   (final orientation correction)
+
+v_cmd     = clamp(k_ρ × ρ,  0, v_max)
+ω_cmd     = kp × α  +  ki × ∫α dt  +  kd × (dα/dt)  +  k_β × β
+```
+
+The β term is only activated near the final goal waypoint to align the robot's heading on arrival.
 
 ### Dynamic Lookahead
+
 ```
-lookahead = speed × lookahead_ratio + min_lookahead
+lookahead_dist = v_current × lookahead_ratio + min_lookahead
 ```
 
-### Line-of-Sight Shortcutting (Bresenham)
-Before selecting the next waypoint, checks if a straight line to the final goal is collision-free using Bresenham's line algorithm. Shortcuts directly to goal if clear, reducing path length and execution time.
+The lookahead point walks ahead of the robot along the path proportionally to current speed, giving smoother tracking at speed while maintaining precision at low speed.
 
-### Wall Follower (PID)
-Maintains desired distance from the right wall using the 45° angled LiDAR reading as primary input (more stable than 90°). Stops and turns left when an obstacle appears in front.
+### Wall Follower — PID (`nodes/frontier_explorer_node.py`)
+
+Used as a fallback in the SLAM explorer when A\* planning fails in narrow or unexplored spaces. Maintains a desired lateral distance from the right wall using the 45°-angled LiDAR reading as primary feedback (more stable than the 90° reading in corridors). Stops and turns left when the front sector detects an obstacle.
 
 ---
 
 ## MATLAB PID Optimization
 
-The PID path follower parameters were optimized offline using **MATLAB's `fmincon`** with a **multi-start strategy** to escape local minima and find globally robust gains.
+PID controller gains and the lookahead distance were optimized offline in MATLAB using multi-start `fmincon` to find globally robust parameters rather than a single locally-optimal solution.
+
+**Script:** `MATLAB/pid_tuner_ROBOTMOD.m`
 
 ### Optimization Setup
 
 | Setting | Value |
 |---|---|
 | Optimizer | `fmincon` (SQP algorithm) |
-| Strategy | Multi-start: 20 random initial points |
-| Parameters tuned | `k_rho`, `kp_ang`, `ki_ang`, `kd_ang`, `k_beta`, `lookahead_dist` |
-| Cost weights | `W_error = 40.0`, `W_time = 0.15` |
+| Strategy | Multi-start: 20 uniformly random initial points within bounds |
+| Parameters | `k_rho`, `kp_ang`, `ki_ang`, `kd_ang`, `k_beta`, `lookahead_dist` |
+| Simulation timestep | 0.02 s, 40 s horizon |
 
 ### Cost Function
+
 ```
-J = W_error × MSE(position_error) + W_time × time_penalty
+J = W_error × MSE(cross-track error) + W_time × time_penalty
+
+W_error = 40.0    (penalize path deviation)
+W_time  = 0.15    (penalize slow completion)
+
+time_penalty = sim_total_time + 500 + dist_to_goal × 50   (if goal not reached)
+             = actual_time_taken                           (if goal reached)
 ```
-Penalizes both tracking error and execution time — creating an explicit speed/precision trade-off.
+
+The cross-track error is the minimum perpendicular distance from each trajectory point to the nearest path segment, computed via point-to-segment projection.
 
 ### Simulation Fidelity
-The MATLAB optimizer runs a closed-loop simulation that includes:
-- **First-order actuator dynamics**: τ_v = 0.2 s (linear), τ_ω = 0.1 s (angular)
-- **Sensor noise**: position σ = 0.01 m, angular σ = 0.02 rad
 
-This ensures parameters are robust to real-world actuator lag and sensor noise, not just ideal conditions.
+The MATLAB optimizer runs a fully closed-loop simulation including:
 
-### MATLAB GUI PID Tuner
-A companion interactive GUI (MATLAB App Designer) provides live sliders for each parameter with real-time step response visualization, enabling rapid manual fine-tuning and intuitive understanding of parameter interactions.
+| Effect | Model |
+|---|---|
+| Linear actuator lag | First-order: `v(t+dt) = v(t) + (v_cmd − v(t)) × dt / τ_v`,  τ_v = 0.2 s |
+| Angular actuator lag | First-order: `ω(t+dt) = ω(t) + (ω_cmd − ω(t)) × dt / τ_ω`,  τ_ω = 0.1 s |
+| Position sensor noise | Gaussian: σ = 0.01 m |
+| Heading sensor noise | Gaussian: σ = 0.02 rad |
+
+This ensures optimized gains are robust to the actuator lag and measurement noise present in real deployment, not just ideal-conditions simulation.
 
 ### Optimized Parameters
 
@@ -252,139 +357,7 @@ A companion interactive GUI (MATLAB App Designer) provides live sliders for each
 | `ki_angular` | optimized | Integral gain for angular PID |
 | `kd_angular` | optimized | Derivative gain for angular PID |
 | `k_beta` | optimized | Final orientation correction gain |
-| `lookahead_dist` | optimized | Base lookahead distance |
-
----
-
-## Configuration & Tuning
-
-Key parameters in the task files:
-
-| Parameter | Default | Description |
-|---|---|---|
-| `speed_max` | 0.31 m/s | Maximum linear speed |
-| `rotspeed_max` | 1.9 rad/s | Maximum angular speed |
-| `goal_tolerance` | 0.1 m | Distance to consider goal reached |
-| `inflation_kernel_size` | 4–10 cells | Obstacle inflation radius |
-| `min_frontier_distance` | 0.6 m | Ignore frontiers closer than this |
-| `Frontier_W_dist` | 1.0 | Weight for distance in frontier cost |
-| `Frontier_W_power` | 3.0 | Weight for information gain in frontier cost |
-| `k_rho` | 0.8608 | Proportional gain for linear speed (MATLAB optimized) |
-| `kp_angular` | 2.0747 | Proportional gain for angular PID (MATLAB optimized) |
-| `min_front_obstacle_distance` | 0.35 m | Trigger obstacle avoidance |
-| `retreat_distance` | 0.25 m | How far to reverse when obstacle detected |
-| `rrt_star_iterations` | configurable | RRT* planning iterations for local bypass |
-
----
-
-## Dependencies
-
-### ROS2 Packages
-- `rclpy` — ROS2 Python client library
-- `nav_msgs` — OccupancyGrid, Path, Odometry
-- `geometry_msgs` — PoseStamped, Twist, PoseWithCovarianceStamped
-- `sensor_msgs` — LaserScan, Image
-- `vision_msgs` — BoundingBox2D
-- `tf2_ros` — TF2 transform listener
-- `cv_bridge` — ROS ↔ OpenCV image conversion
-
-### Python Libraries
-```
-numpy
-opencv-python (cv2)
-Pillow (PIL)
-PyYAML
-pandas
-```
-
-### Simulation
-- **Gazebo** — physics simulation
-- **TurtleBot3** — robot model and packages
-- **SLAM Toolbox** — for Task 1 live mapping
-
-### Optimization (offline)
-- **MATLAB** — `fmincon` optimizer, Control System Toolbox
-- **MATLAB App Designer** — GUI PID tuner
-
----
-
-## Installation & Build
-
-```bash
-# 1. Clone the repository
-git clone https://github.com/PhillippGery/Autonomous_Housekeeping_Robot.git
-cd Autonomous_Housekeeping_Robot/src
-
-# 2. Install ROS2 dependencies
-rosdep install --from-paths . --ignore-src -r -y
-
-# 3. Build the workspace
-colcon build --symlink-install
-
-# 4. Source the workspace
-source install/setup.bash
-```
-
----
-
-## Running the Simulation
-
-### Task 1 — Autonomous Exploration
-
-```bash
-# Terminal 1: Launch Gazebo simulation
-ros2 launch turtlebot3_gazebo turtlebot3_house.launch.py
-
-# Terminal 2: Launch SLAM Toolbox (online async)
-ros2 launch turtlebot3_gazebo mapper.launch.py
-
-# Terminal 3: Run the exploration node
-ros2 run turtlebot3_gazebo task1
-```
-
-### Task 2 — Navigation on Known Map
-
-```bash
-# Terminal 1: Launch Gazebo simulation
-ros2 launch turtlebot3_gazebo turtlebot3_house.launch.py
-
-# Terminal 2: Launch AMCL localization
-ros2 launch turtlebot3_gazebo amcl.launch.py
-
-# Terminal 3: Run the navigation node
-ros2 run turtlebot3_gazebo task2
-
-# In RViz: Use "2D Nav Goal" tool to set a navigation target
-```
-
-### Task 2 Bonus — RRT* Reactive Patrol
-
-```bash
-# Terminal 1: Launch Gazebo simulation
-ros2 launch turtlebot3_gazebo turtlebot3_house.launch.py
-
-# Terminal 2: Launch AMCL localization
-ros2 launch turtlebot3_gazebo amcl.launch.py
-
-# Terminal 3: Run the RRT* patrol node
-ros2 run turtlebot3_gazebo task2_bonus
-```
-
-### Task 3 — Ball Tracking
-
-```bash
-# Terminal 1: Launch Gazebo with balls spawned
-ros2 launch turtlebot3_gazebo turtlebot3_house.launch.py
-
-# Terminal 2: Spawn colored ball objects
-ros2 run turtlebot3_gazebo spawn_objects
-
-# Terminal 3: Launch AMCL
-ros2 launch turtlebot3_gazebo amcl.launch.py
-
-# Terminal 4: Run the ball tracking node
-ros2 run turtlebot3_gazebo task3
-```
+| `lookahead_dist` | optimized | Base lookahead distance (m) |
 
 ---
 
@@ -392,50 +365,223 @@ ros2 run turtlebot3_gazebo task3
 
 ```
 Autonomous_Housekeeping_Robot/
+├── README.md
+├── CLAUDE.md                              ← project context for Claude Code
+├── figures/
+│   ├── Obstackle_Avoidance_exaple.png     ← obstacle avoidance screenshot
+│   ├── Mapping.mov                        ← SLAM exploration demo video
+│   └── ball_tracker.mov                   ← ball detection demo video
+├── MATLAB/
+│   └── pid_tuner_ROBOTMOD.m               ← multi-start fmincon PID optimization
 └── src/
-    ├── turtlebot3_gazebo/
-    │   ├── src/lab4/
-    │   │   ├── task1.py             # Autonomous SLAM exploration
-    │   │   ├── task2.py             # Navigation + obstacle avoidance (A*)
-    │   │   ├── task2_bonus.py       # A* global + RRT* local planner patrol
-    │   │   ├── task3.py             # Ball detection & navigation
-    │   │   ├── spawn_objects.py     # Spawns balls in Gazebo
-    │   │   └── static_obstacles.py  # Spawns static obstacles
-    │   ├── src_fcn/
-    │   │   ├── AStar.py             # Standalone A* implementation
-    │   │   ├── auto_navigator.py    # Shared navigation utilities
-    │   │   ├── red_ball_tracker.py  # Standalone ball tracker node
-    │   │   └── wall_follower.py     # PID wall following controller
-    │   ├── maps/
-    │   │   ├── map.yaml             # Pre-built house map
-    │   │   └── sync_classroom_map.yaml
+    ├── turtlebot3_gazebo/                 ← main ROS2 package (ament_cmake + ament_cmake_python)
+    │   │
+    │   ├── turtlebot3_gazebo/             ← installable Python package
+    │   │   ├── __init__.py
+    │   │   ├── common/                    ← shared utilities (imported by all nodes)
+    │   │   │   ├── __init__.py
+    │   │   │   ├── graph_utils.py         ← A* planner, RRT* planner, Bresenham LOS
+    │   │   │   ├── map_utils.py           ← map loading, obstacle inflation, OccupancyGrid helpers
+    │   │   │   ├── geometry_utils.py      ← TF2 lookups, polar↔Cartesian transforms, angle wrapping
+    │   │   │   └── lidar_utils.py         ← LaserScan processing, range extraction, jump detection
+    │   │   └── nodes/                     ← ROS2 node implementations
+    │   │       ├── __init__.py
+    │   │       ├── frontier_explorer_node.py   ← SLAM + frontier exploration + wall following
+    │   │       ├── global_planner_node.py      ← AMCL + A*/RRT* navigation + obstacle avoidance
+    │   │       ├── path_follower_node.py       ← PID polar-coordinate path follower
+    │   │       ├── obstacle_detector_node.py   ← LiDAR-based obstacle geometry estimation
+    │   │       ├── costmap_node.py             ← inflated costmap publisher
+    │   │       ├── gazebo_spawner_node.py      ← Gazebo model spawn/move service
+    │   │       └── vision_node.py              ← OpenCV ball detection & approach
+    │   │
+    │   ├── scripts/                       ← thin entry-point wrappers (ros2 run targets)
+    │   │   ├── map_navigator              → global_planner_node.main()
+    │   │   ├── map_navigator_rrt_star     → global_planner_node.main() [planner_type:=rrtstar]
+    │   │   ├── slam_explorer              → frontier_explorer_node.main()
+    │   │   ├── vision_navigator           → vision_node.main()
+    │   │   ├── path_follower              → path_follower_node.main()
+    │   │   ├── obstacle_detector          → obstacle_detector_node.main()
+    │   │   ├── costmap_server             → costmap_node.main()
+    │   │   └── gazebo_spawner             → gazebo_spawner_node.main()
+    │   │
+    │   ├── src/                           ← original monolithic node scripts (reference)
+    │   │   ├── slam_explorer.py
+    │   │   ├── map_navigator.py
+    │   │   ├── map_navigator_RRT_star.py
+    │   │   ├── vision_navigator.py
+    │   │   ├── dynamic_obstacles.py
+    │   │   ├── static_obstacles.py
+    │   │   └── spawn_objects.py
+    │   │
     │   ├── launch/
-    │   │   ├── turtlebot3_house.launch.py
-    │   │   ├── amcl.launch.py
-    │   │   ├── mapper.launch.py
-    │   │   └── ...
-    │   └── params/
-    │       ├── amcl.yaml
-    │       └── mapper_params_online_async.yaml
-    ├── sim_utils/
-    │   └── sim_utils/
-    │       └── red_ball_control.py  # Ball motion controller for simulation
-    └── matlab/
-        ├── pid_optimizer.m          # Multi-start fmincon PID optimization
-        └── pid_tuner_gui.mlapp      # Interactive MATLAB GUI PID tuner
+    │   │   ├── mapper.launch.py           ← Task 1: Gazebo + SLAM Toolbox + slam_explorer
+    │   │   └── navigator.launch.py        ← Task 2/3: Gazebo + map_server + AMCL + navigator
+    │   ├── maps/
+    │   │   ├── map.yaml                   ← pre-built house map (0.05 m/cell)
+    │   │   └── map.pgm
+    │   ├── models/                        ← Gazebo SDF models (balls, obstacles, robot)
+    │   ├── worlds/                        ← Gazebo world files
+    │   ├── params/                        ← AMCL / SLAM Toolbox YAML configs
+    │   ├── rviz/                          ← RViz configuration
+    │   ├── urdf/                          ← TurtleBot3 Waffle URDF
+    │   ├── CMakeLists.txt
+    │   ├── package.xml
+    │   └── setup.py
+    └── sim_utils/                         ← Python utility package (ament_python)
 ```
 
 ---
 
-## Design Philosophy
+## Installation & Build
 
-Built with a **safety-first, bottom-up** approach: robust low-level motion control was established first, then higher-level behaviors were layered on top. Every state has explicit safety zones and fallback behaviors.
+### Prerequisites
 
-The monolithic file structure (single Python file per task) was a conscious decision for rapid iteration during the course, and is acknowledged as a limitation for production systems. Future improvements would include proper ROS2 node decomposition, improved SLAM parameter tuning, and better utilization of the broader ROS2 ecosystem (nav2, costmap plugins, etc.).
+- **ROS2 Humble** (Ubuntu 22.04)
+- **Gazebo 11**
+- **TurtleBot3** packages: `ros-humble-turtlebot3*`
+- **SLAM Toolbox**: `ros-humble-slam-toolbox`
+- **Nav2**: `ros-humble-nav2-*`
+- Python: `numpy`, `opencv-python`, `pillow`, `pyyaml`
+
+```bash
+sudo apt install ros-humble-turtlebot3 ros-humble-turtlebot3-simulations \
+     ros-humble-slam-toolbox ros-humble-nav2-amcl ros-humble-nav2-map-server \
+     ros-humble-nav2-lifecycle-manager python3-numpy python3-opencv python3-pil
+```
+
+### Build
+
+```bash
+# Clone
+git clone https://github.com/PhillippGery/Autonomous_Housekeeping_Robot.git
+cd Autonomous_Housekeeping_Robot
+
+# Install ROS dependencies
+rosdep install --from-paths src --ignore-src -r -y
+
+# Build
+colcon build --packages-select turtlebot3_gazebo
+
+# Source (required after every build)
+source install/setup.bash
+
+# Set TurtleBot3 model
+export TURTLEBOT3_MODEL=waffle
+```
+
+---
+
+## Running the Simulation
+
+> **Note:** Always `source install/setup.bash` and `export TURTLEBOT3_MODEL=waffle` before launching.
+
+### Task 1 — Autonomous Exploration & Mapping
+
+```bash
+ros2 launch turtlebot3_gazebo mapper.launch.py
+```
+
+Starts: Gazebo house world + SLAM Toolbox (online async) + `slam_explorer` node.
+
+Optional: `bonus:=true` to use the bonus Gazebo world instead of the house.
+
+### Task 2 — Navigation with Static Obstacle Avoidance (A\*)
+
+```bash
+ros2 launch turtlebot3_gazebo navigator.launch.py static_obstacles:=true
+```
+
+Starts: Gazebo + map_server + AMCL + lifecycle_manager + `map_navigator` (A\* planner).
+
+Set a navigation goal using RViz **"2D Nav Goal"** tool.
+
+### Task 2 Bonus — Navigation with RRT\* Local Planner
+
+```bash
+ros2 launch turtlebot3_gazebo navigator.launch.py static_obstacles:=true bonus:=true
+```
+
+Identical to Task 2 but uses `map_navigator_rrt_star` — RRT\* local planner activates on obstacle detection.
+
+### Task 3 — Ball Detection & Navigation
+
+```bash
+ros2 launch turtlebot3_gazebo navigator.launch.py spawn_objects:=true
+```
+
+Starts: Gazebo + map_server + AMCL + lifecycle_manager + `gazebo_spawner` (spawns balls & cricket_ball) + `vision_navigator`.
+
+The robot autonomously visits room waypoints, detects colored balls, and approaches them.
+
+### Launch Arguments Reference
+
+| Argument | Default | Effect |
+|---|---|---|
+| `static_obstacles` | `false` | Spawn static obstacle set + start `map_navigator` |
+| `bonus` | `false` | Use `map_navigator_rrt_star` instead of `map_navigator` |
+| `spawn_objects` | `false` | Spawn balls + start `vision_navigator` |
+| `use_rviz` | `true` | Launch RViz with pre-configured display |
+| `use_sim_time` | `true` | Use Gazebo simulation clock |
+
+---
+
+## Configuration Reference
+
+Key parameters across the nodes:
+
+| Parameter | Default | Description |
+|---|---|---|
+| `speed_max` | 0.31 m/s | Maximum linear speed |
+| `rotspeed_max` | 1.9 rad/s | Maximum angular speed |
+| `goal_tolerance` | 0.10 m | Distance threshold to declare goal reached |
+| `inflation_kernel_size` | 4–10 cells | Obstacle inflation radius on costmap |
+| `min_frontier_distance` | 0.6 m | Ignore frontiers closer than this (Task 1) |
+| `Frontier_W_dist` | 1.0 | Distance weight in frontier cost function |
+| `Frontier_W_power` | 3.0 | Information gain weight in frontier cost function |
+| `k_rho` | 0.8608 | Proportional gain for linear speed (MATLAB optimized) |
+| `kp_angular` | 2.0747 | Proportional gain for angular PID (MATLAB optimized) |
+| `min_front_obstacle_distance` | 0.35 m | LiDAR range that triggers obstacle avoidance |
+| `retreat_distance` | 0.25 m | Reverse distance on obstacle detection |
+| `rrt_star_iterations` | configurable | RRT\* tree expansion iterations |
+| `lookahead_ratio` | configurable | Speed-proportional lookahead multiplier |
+
+---
+
+## ROS2 Topic Reference
+
+| Topic | Type | Publisher | Subscriber |
+|---|---|---|---|
+| `/map` | `OccupancyGrid` | slam_toolbox | frontier_explorer |
+| `/amcl_pose` | `PoseWithCovarianceStamped` | amcl | global_planner |
+| `/scan` | `LaserScan` | Gazebo | all navigators |
+| `/cmd_vel` | `Twist` | navigators | Gazebo |
+| `/camera/image_raw` | `Image` | Gazebo | vision_node |
+| `/move_base_simple/goal` | `PoseStamped` | RViz | all navigators |
+| `global_plan` | `Path` | navigators | RViz |
+| `/custom_costmap` | `OccupancyGrid` | costmap_node | RViz |
+| `/bbox` | `BoundingBox2D` | vision_node | — |
+| `/red_pos` / `/blue_pos` / `/green_pos` | `PoseStamped` | vision_node | — |
+| `astar_time` | `Float32` | navigators | — |
+
+---
+
+## Dependencies
+
+### ROS2 Packages
+`rclpy` · `nav_msgs` · `geometry_msgs` · `sensor_msgs` · `vision_msgs` · `tf2_ros` · `cv_bridge` · `gazebo_ros_pkgs` · `slam_toolbox` · `nav2_amcl` · `nav2_map_server` · `nav2_lifecycle_manager`
+
+### Python
+`numpy` · `opencv-python` · `pillow` · `pyyaml`
+
+### Simulation
+**Gazebo 11** · **TurtleBot3 Waffle** model and packages
+
+### Optimization (offline)
+**MATLAB** with Optimization Toolbox (`fmincon`, SQP)
 
 ---
 
 ## Authors
 
-**Phillipp Gery** — Purdue University, MS Interdisciplinary Engineering (Autonomy & Robotics)  
-Fulbright Scholar 
+**Phillipp Gery** — Purdue University, MS Interdisciplinary Engineering (Autonomy & Robotics)
+Fulbright Scholar

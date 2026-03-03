@@ -20,6 +20,7 @@ endif()
 # Find ament packages and libraries for ament and system dependencies
 ################################################################################
 find_package(ament_cmake REQUIRED)
+find_package(ament_cmake_python REQUIRED)
 find_package(gazebo REQUIRED)
 find_package(gazebo_ros_pkgs REQUIRED)
 
@@ -88,6 +89,24 @@ install(
 install(
   PROGRAMS
     src/dynamic_obstacles.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+################################################################################
+# Install Python package (new modular structure)
+################################################################################
+ament_python_install_package(${PROJECT_NAME})
+
+install(
+  PROGRAMS
+    scripts/map_navigator
+    scripts/map_navigator_rrt_star
+    scripts/slam_explorer
+    scripts/vision_navigator
+    scripts/costmap_server
+    scripts/path_follower
+    scripts/obstacle_detector
+    scripts/gazebo_spawner
   DESTINATION lib/${PROJECT_NAME}
 )
 
