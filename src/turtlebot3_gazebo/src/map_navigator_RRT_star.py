@@ -87,6 +87,7 @@ class MapNavigatorRRTStar(Node):
         self.use_dynamic_lookahead = True # Enable dynamic lookahead based on speed
         self.use_line_of_sight_check = True # Enable line-of-sight shortcut checking
         self.shortcut_active = False #if a shortcut is being taken true
+        self.closest_idx = 0
 
         self.get_logger().info(f"Loading map from '{self.map_yaml_path}' and building graph...")
         self.map_processor = MapProcessor(self.map_yaml_path)
@@ -268,18 +269,16 @@ class MapNavigatorRRTStar(Node):
                 path = self.rrt_planner.path_to_pose_stamped(path_names, path_dist)
             else:
                 self.state = 'ASTARPATH_FOLLOWING'
+                for name in path_names:
+                    grid_coords = tuple(map(int, name.split(',')))
+                    world_coords = self._grid_to_world(grid_coords)
 
-            
-            for name in path_names:
-                grid_coords = tuple(map(int, name.split(',')))
-                world_coords = self._grid_to_world(grid_coords)
-                
-                pose = PoseStamped()
-                pose.header = path.header
-                pose.pose.position.x = world_coords[0]
-                pose.pose.position.y = world_coords[1]
-                pose.pose.orientation.w = 1.0 
-                path.poses.append(pose)
+                    pose = PoseStamped()
+                    pose.header = path.header
+                    pose.pose.position.x = world_coords[0]
+                    pose.pose.position.y = world_coords[1]
+                    pose.pose.orientation.w = 1.0
+                    path.poses.append(pose)
         else:
             self.get_logger().warn("A* failed to find a path.")
             self.move_ttbot(0.0, 0.0)
